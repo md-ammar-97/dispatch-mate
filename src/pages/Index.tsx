@@ -1,12 +1,55 @@
-// Update this page (the content is just a fallback if you fail to update the page)
+import { AnimatePresence } from 'framer-motion';
+import { useDispatch } from '@/hooks/useDispatch';
+import { CSVIntake } from '@/screens/CSVIntake';
+import { LiveCommandCenter } from '@/screens/LiveCommandCenter';
+import { BatchSummaryScreen } from '@/screens/BatchSummaryScreen';
 
 const Index = () => {
+  const {
+    screen,
+    dataset,
+    calls,
+    selectedCall,
+    setSelectedCallId,
+    isExecuting,
+    progress,
+    initializeDataset,
+    startBatch,
+    emergencyStop,
+    resetToIntake,
+  } = useDispatch();
+
   return (
-    <div className="flex min-h-screen items-center justify-center bg-background">
-      <div className="text-center">
-        <h1 className="mb-4 text-4xl font-bold">Welcome to Your Blank App</h1>
-        <p className="text-xl text-muted-foreground">Start building your amazing project here!</p>
-      </div>
+    <div className="min-h-screen bg-background">
+      <AnimatePresence mode="wait">
+        {screen === 'intake' && (
+          <CSVIntake key="intake" onConfirm={initializeDataset} />
+        )}
+
+        {screen === 'command' && dataset && (
+          <LiveCommandCenter
+            key="command"
+            dataset={dataset}
+            calls={calls}
+            selectedCall={selectedCall}
+            onSelectCall={setSelectedCallId}
+            isExecuting={isExecuting}
+            progress={progress}
+            onStartBatch={startBatch}
+            onEmergencyStop={emergencyStop}
+          />
+        )}
+
+        {screen === 'summary' && dataset && (
+          <BatchSummaryScreen
+            key="summary"
+            dataset={dataset}
+            calls={calls}
+            onReset={resetToIntake}
+            onSelectCall={setSelectedCallId}
+          />
+        )}
+      </AnimatePresence>
     </div>
   );
 };
