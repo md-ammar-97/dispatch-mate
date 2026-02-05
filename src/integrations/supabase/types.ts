@@ -14,7 +14,104 @@ export type Database = {
   }
   public: {
     Tables: {
-      [_ in never]: never
+      calls: {
+        Row: {
+          call_duration: number | null
+          call_sid: string | null
+          completed_at: string | null
+          created_at: string
+          dataset_id: string
+          driver_name: string
+          error_message: string | null
+          id: string
+          live_transcript: string | null
+          phone_number: string
+          recording_url: string | null
+          refined_transcript: string | null
+          reg_no: string
+          started_at: string | null
+          status: string
+        }
+        Insert: {
+          call_duration?: number | null
+          call_sid?: string | null
+          completed_at?: string | null
+          created_at?: string
+          dataset_id: string
+          driver_name: string
+          error_message?: string | null
+          id?: string
+          live_transcript?: string | null
+          phone_number: string
+          recording_url?: string | null
+          refined_transcript?: string | null
+          reg_no: string
+          started_at?: string | null
+          status?: string
+        }
+        Update: {
+          call_duration?: number | null
+          call_sid?: string | null
+          completed_at?: string | null
+          created_at?: string
+          dataset_id?: string
+          driver_name?: string
+          error_message?: string | null
+          id?: string
+          live_transcript?: string | null
+          phone_number?: string
+          recording_url?: string | null
+          refined_transcript?: string | null
+          reg_no?: string
+          started_at?: string | null
+          status?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "calls_dataset_id_fkey"
+            columns: ["dataset_id"]
+            isOneToOne: false
+            referencedRelation: "datasets"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      datasets: {
+        Row: {
+          approved_at: string | null
+          completed_at: string | null
+          created_at: string
+          failed_calls: number
+          id: string
+          name: string
+          status: string
+          successful_calls: number
+          total_calls: number
+        }
+        Insert: {
+          approved_at?: string | null
+          completed_at?: string | null
+          created_at?: string
+          failed_calls?: number
+          id?: string
+          name: string
+          status?: string
+          successful_calls?: number
+          total_calls?: number
+        }
+        Update: {
+          approved_at?: string | null
+          completed_at?: string | null
+          created_at?: string
+          failed_calls?: number
+          id?: string
+          name?: string
+          status?: string
+          successful_calls?: number
+          total_calls?: number
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
