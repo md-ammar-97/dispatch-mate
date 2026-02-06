@@ -7,29 +7,6 @@ const corsHeaders = {
     "authorization, x-client-info, apikey, content-type",
 };
 
-// All possible event types from Subverse
-const TRANSCRIPT_EVENTS = [
-  "call.transcript",
-  "call.transcript.partial",
-  "transcript.partial",
-  "transcript",
-];
-
-const COMPLETION_EVENTS = [
-  "call.completed",
-  "call.ended",
-  "call_finished",
-];
-
-const FAILURE_EVENTS = [
-  "call.failed",
-  "call.no_answer",
-  "call.busy",
-  "call.canceled",
-];
-
-const TERMINAL_STATUSES = ["completed", "failed", "canceled"];
-
 interface SubverseWebhookPayload {
   event: string;
   callId?: string;
@@ -40,15 +17,8 @@ interface SubverseWebhookPayload {
   recordingUrl?: string;
   recording_url?: string;
   transcript?: string;
-  text?: string;
-  content?: string;
   refinedTranscript?: string;
   refined_transcript?: string;
-  data?: {
-    transcript?: string;
-    text?: string;
-    content?: string;
-  };
   metadata?: {
     call_id?: string;
     dataset_id?: string;
@@ -59,7 +29,6 @@ interface SubverseWebhookPayload {
 
 /**
  * Extract call identifier from payload with fallbacks
- * Priority: metadata.call_id > callId > callSid > call_id
  */
 function extractCallId(payload: SubverseWebhookPayload): string | null {
   return (
@@ -72,29 +41,10 @@ function extractCallId(payload: SubverseWebhookPayload): string | null {
 }
 
 /**
- * Extract transcript text from various payload shapes
- */
-function extractTranscript(payload: SubverseWebhookPayload): string | null {
-  // Direct fields first
-  if (payload.transcript) return payload.transcript;
-  if (payload.text) return payload.text;
-  if (payload.content) return payload.content;
-  
-  // Nested in data object
-  if (payload.data) {
-    if (payload.data.transcript) return payload.data.transcript;
-    if (payload.data.text) return payload.data.text;
-    if (payload.data.content) return payload.data.content;
-  }
-  
-  return null;
-}
-
-/**
  * Extract refined transcript with fallbacks
  */
 function extractRefinedTranscript(payload: SubverseWebhookPayload): string | null {
-  return payload.refinedTranscript || payload.refined_transcript || null;
+  return payload.refinedTranscript || payload.refined_transcript || payload.transcript || null;
 }
 
 /**
@@ -111,7 +61,6 @@ async function findCall(
   supabase: ReturnType<typeof createClient>,
   callId: string
 ): Promise<{ id: string; dataset_id: string; status: string } | null> {
-  // Try matching internal UUID first (if it looks like a UUID)
   const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   
   if (uuidRegex.test(callId)) {
@@ -124,7 +73,6 @@ async function findCall(
     if (callById) return callById;
   }
   
-  // Fallback to matching on call_sid (Subverse's external ID)
   const { data: callBySid } = await supabase
     .from("calls")
     .select("id, dataset_id, status")
@@ -135,7 +83,7 @@ async function findCall(
 }
 
 /**
- * Check if all calls for a dataset are in terminal status and update dataset accordingly
+ * Check if all calls for a dataset are terminal and update dataset accordingly
  */
 async function checkAndUpdateDatasetCompletion(
   supabase: ReturnType<typeof createClient>,
@@ -145,7 +93,7 @@ async function checkAndUpdateDatasetCompletion(
     .from("calls")
     .select("id")
     .eq("dataset_id", datasetId)
-    .not("status", "in", `(${TERMINAL_STATUSES.join(",")})`);
+    .not("status", "in", "(completed,failed,canceled)");
 
   if (!remaining || remaining.length === 0) {
     console.log(`[Webhook] All calls complete for dataset ${datasetId}`);
@@ -160,12 +108,10 @@ async function checkAndUpdateDatasetCompletion(
 }
 
 serve(async (req) => {
-  // Handle CORS preflight
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
   }
 
-  // Only accept POST requests
   if (req.method !== "POST") {
     return new Response(
       JSON.stringify({ error: "Method not allowed" }),
@@ -181,7 +127,6 @@ serve(async (req) => {
     const payload: SubverseWebhookPayload = await req.json();
     console.log("[Webhook] Received event:", payload.event, "payload:", JSON.stringify(payload));
 
-    // Extract call identifier with fallbacks
     const callId = extractCallId(payload);
     const datasetId = payload.metadata?.dataset_id;
 
@@ -193,7 +138,6 @@ serve(async (req) => {
       );
     }
 
-    // Find the call in database
     const call = await findCall(supabase, callId);
     
     if (!call) {
@@ -207,119 +151,83 @@ serve(async (req) => {
     const eventType = payload.event?.toLowerCase() || "";
     const resolvedDatasetId = datasetId || call.dataset_id;
 
-    // Handle transcript events (including partials)
-    if (TRANSCRIPT_EVENTS.some(e => eventType.includes(e.replace("call.", "")))) {
-      const transcript = extractTranscript(payload);
+    // Only process call.completed events for post-call review model
+    if (eventType === "call.completed" || eventType === "call.ended" || eventType === "call_finished") {
+      // Skip if already in terminal status (idempotent)
+      if (["completed", "failed", "canceled"].includes(call.status)) {
+        console.log(`[Webhook] Call ${call.id} already terminal: ${call.status}, skipping`);
+        return new Response(
+          JSON.stringify({ success: true, skipped: true, reason: "already_terminal" }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
+      console.log(`[Webhook] Call ${call.id} completed - updating refined_transcript`);
       
-      if (transcript) {
-        console.log(`[Webhook] Updating live_transcript for call ${call.id}`);
-        
-        // For partial transcripts, we could append, but Subverse typically sends cumulative
-        // So we update with the latest transcript
-        await supabase
-          .from("calls")
-          .update({ 
-            live_transcript: transcript,
-            status: "active" // Ensure status reflects active call
-          })
-          .eq("id", call.id);
+      const updateData: Record<string, unknown> = {
+        status: "completed",
+        completed_at: new Date().toISOString(),
+      };
+
+      if (payload.duration) {
+        updateData.call_duration = payload.duration;
       }
-    }
 
-    // Handle call ringing/answered events
-    if (eventType === "call.ringing") {
-      console.log(`[Webhook] Call ${call.id} is ringing`);
+      const recordingUrl = extractRecordingUrl(payload);
+      if (recordingUrl) {
+        updateData.recording_url = recordingUrl;
+      }
+
+      const refinedTranscript = extractRefinedTranscript(payload);
+      if (refinedTranscript) {
+        updateData.refined_transcript = refinedTranscript;
+      }
+
       await supabase
         .from("calls")
-        .update({ status: "ringing" })
+        .update(updateData)
         .eq("id", call.id);
+
+      // Increment successful count
+      await supabase.rpc("increment_dataset_counts", {
+        p_dataset_id: resolvedDatasetId,
+        p_successful: 1,
+        p_failed: 0,
+      });
+
+      await checkAndUpdateDatasetCompletion(supabase, resolvedDatasetId);
     }
 
-    if (eventType === "call.answered" || eventType === "call.active") {
-      console.log(`[Webhook] Call ${call.id} is active`);
+    // Handle failure events
+    if (eventType === "call.failed" || eventType === "call.no_answer" || eventType === "call.busy" || eventType === "call.canceled") {
+      if (["completed", "failed", "canceled"].includes(call.status)) {
+        console.log(`[Webhook] Call ${call.id} already terminal: ${call.status}, skipping`);
+        return new Response(
+          JSON.stringify({ success: true, skipped: true, reason: "already_terminal" }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
+      console.log(`[Webhook] Call ${call.id} failed: ${payload.event}`);
+      
+      const failureReason = payload.event?.replace("call.", "").replace("_", " ") || "unknown";
+      
       await supabase
         .from("calls")
-        .update({ status: "active" })
-        .eq("id", call.id);
-    }
-
-    // Handle completion events (idempotent - don't regress terminal status)
-    if (COMPLETION_EVENTS.some(e => eventType.includes(e.replace("call.", "")))) {
-      // Only update if not already in terminal status
-      if (!TERMINAL_STATUSES.includes(call.status)) {
-        console.log(`[Webhook] Call ${call.id} completed`);
-        
-        const updateData: Record<string, unknown> = {
-          status: "completed",
+        .update({
+          status: "failed",
+          error_message: `Call ${failureReason}`,
           completed_at: new Date().toISOString(),
-        };
+        })
+        .eq("id", call.id);
 
-        if (payload.duration) {
-          updateData.call_duration = payload.duration;
-        }
+      await supabase.rpc("increment_dataset_counts", {
+        p_dataset_id: resolvedDatasetId,
+        p_successful: 0,
+        p_failed: 1,
+      });
 
-        const recordingUrl = extractRecordingUrl(payload);
-        if (recordingUrl) {
-          updateData.recording_url = recordingUrl;
-        }
-
-        const refinedTranscript = extractRefinedTranscript(payload);
-        const rawTranscript = extractTranscript(payload);
-        
-        if (refinedTranscript) {
-          updateData.refined_transcript = refinedTranscript;
-        } else if (rawTranscript) {
-          updateData.refined_transcript = rawTranscript;
-        }
-
-        await supabase
-          .from("calls")
-          .update(updateData)
-          .eq("id", call.id);
-
-        // Increment successful count (only on transition to completed)
-        await supabase.rpc("increment_dataset_counts", {
-          p_dataset_id: resolvedDatasetId,
-          p_successful: 1,
-          p_failed: 0,
-        });
-
-        // Check if dataset is complete
-        await checkAndUpdateDatasetCompletion(supabase, resolvedDatasetId);
-      } else {
-        console.log(`[Webhook] Call ${call.id} already in terminal status: ${call.status}, skipping`);
-      }
-    }
-
-    // Handle failure events (idempotent)
-    if (FAILURE_EVENTS.some(e => eventType.includes(e.replace("call.", "")))) {
-      // Only update if not already in terminal status
-      if (!TERMINAL_STATUSES.includes(call.status)) {
-        console.log(`[Webhook] Call ${call.id} failed with event: ${payload.event}`);
-        
-        const failureReason = payload.event?.replace("call.", "").replace("_", " ") || "unknown";
-        
-        await supabase
-          .from("calls")
-          .update({
-            status: "failed",
-            error_message: `Call ${failureReason}`,
-            completed_at: new Date().toISOString(),
-          })
-          .eq("id", call.id);
-
-        // Increment failed count (only on transition to failed)
-        await supabase.rpc("increment_dataset_counts", {
-          p_dataset_id: resolvedDatasetId,
-          p_successful: 0,
-          p_failed: 1,
-        });
-
-        // Check if dataset is complete
-        await checkAndUpdateDatasetCompletion(supabase, resolvedDatasetId);
-      } else {
-        console.log(`[Webhook] Call ${call.id} already in terminal status: ${call.status}, skipping`);
-      }
+      await checkAndUpdateDatasetCompletion(supabase, resolvedDatasetId);
     }
 
     return new Response(

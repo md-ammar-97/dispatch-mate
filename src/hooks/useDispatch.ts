@@ -94,15 +94,14 @@ export function useDispatch() {
   useEffect(() => {
     if (!dataset?.id || !isExecuting || calls.length === 0) return;
 
-    const allCallsTerminal = calls.every(call => 
-      TERMINAL_STATUSES.includes(call.status)
-    );
+    // Simple check without useMemo to avoid hook count issues
+    const allTerminal = calls.every(c => c.status === 'completed' || c.status === 'failed');
 
-    if (allCallsTerminal) {
-      console.log('[BatchWatcher] All calls in terminal status, auto-completing');
+    if (allTerminal) {
+      console.log('[BatchWatcher] All calls terminal, navigating to summary');
       setIsExecuting(false);
       setScreen('summary');
-      toast.success('Batch execution completed');
+      toast.success('Batch completed');
     }
   }, [calls, dataset?.id, isExecuting]);
 
