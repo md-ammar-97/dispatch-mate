@@ -88,14 +88,15 @@
  
        if (datasetError) throw datasetError;
  
-       // Create call records
-       const callRecords = data.map(row => ({
-         dataset_id: newDataset.id,
-         driver_name: row.driver_name,
-         phone_number: formatPhoneNumber(row.phone_number),
-         reg_no: row.reg_no,
-         status: 'queued' as const,
-       }));
+      // Create call records
+      const callRecords = data.map(row => ({
+        dataset_id: newDataset.id,
+        driver_name: row.driver_name,
+        phone_number: formatPhoneNumber(row.phone_number),
+        reg_no: row.reg_no,
+        message: row.message || null,
+        status: 'queued' as const,
+      }));
  
        const { data: newCalls, error: callsError } = await supabase
          .from('calls')

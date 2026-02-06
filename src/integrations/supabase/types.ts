@@ -25,6 +25,7 @@ export type Database = {
           error_message: string | null
           id: string
           live_transcript: string | null
+          message: string | null
           phone_number: string
           recording_url: string | null
           refined_transcript: string | null
@@ -42,6 +43,7 @@ export type Database = {
           error_message?: string | null
           id?: string
           live_transcript?: string | null
+          message?: string | null
           phone_number: string
           recording_url?: string | null
           refined_transcript?: string | null
@@ -59,6 +61,7 @@ export type Database = {
           error_message?: string | null
           id?: string
           live_transcript?: string | null
+          message?: string | null
           phone_number?: string
           recording_url?: string | null
           refined_transcript?: string | null
