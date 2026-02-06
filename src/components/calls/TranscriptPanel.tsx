@@ -12,23 +12,34 @@
    const scrollRef = useRef<HTMLDivElement>(null);
    const [displayedText, setDisplayedText] = useState('');
  
-   // Typewriter effect for live transcript
-   useEffect(() => {
-     if (!call?.live_transcript) {
-       setDisplayedText('');
-       return;
-     }
- 
-     const fullText = call.live_transcript;
-     if (displayedText.length < fullText.length) {
-       const timeout = setTimeout(() => {
-         setDisplayedText(fullText.slice(0, displayedText.length + 1));
-       }, 20);
-       return () => clearTimeout(timeout);
-     } else {
-       setDisplayedText(fullText);
-     }
-   }, [call?.live_transcript, displayedText]);
+  // Determine which transcript to show - refined takes priority when call is completed
+  const transcriptToShow = call?.status === 'completed' && call?.refined_transcript 
+    ? call.refined_transcript 
+    : call?.live_transcript || '';
+
+  // Typewriter effect for live transcript (only during active calls)
+  useEffect(() => {
+    if (!transcriptToShow) {
+      setDisplayedText('');
+      return;
+    }
+
+    // If call is completed, show full transcript immediately (no typewriter)
+    if (call?.status === 'completed') {
+      setDisplayedText(transcriptToShow);
+      return;
+    }
+
+    // Typewriter effect for active calls
+    if (displayedText.length < transcriptToShow.length) {
+      const timeout = setTimeout(() => {
+        setDisplayedText(transcriptToShow.slice(0, displayedText.length + 1));
+      }, 20);
+      return () => clearTimeout(timeout);
+    } else {
+      setDisplayedText(transcriptToShow);
+    }
+  }, [transcriptToShow, displayedText, call?.status]);
  
    // Reset displayed text when call changes
    useEffect(() => {
@@ -76,23 +87,31 @@
                  <div className="text-sm text-muted-foreground">{call.driver_name}</div>
                </div>
  
-               {/* Transcript content */}
-               {displayedText ? (
-                 <div className={cn(
-                   "text-sm leading-relaxed text-foreground whitespace-pre-wrap",
-                   call.status === 'active' && "typewriter"
-                 )}>
-                   {displayedText}
-                 </div>
-               ) : (
-                 <div className="text-sm text-muted-foreground italic">
-                   {call.status === 'queued' && 'Waiting to connect...'}
-                   {call.status === 'ringing' && 'Ringing...'}
-                   {call.status === 'active' && 'Waiting for speech...'}
-                   {call.status === 'completed' && 'Call completed. No transcript available.'}
-                   {call.status === 'failed' && 'Call failed.'}
-                 </div>
-               )}
+                {/* Transcript content */}
+                {displayedText ? (
+                  <div className="space-y-2">
+                    {call.status === 'completed' && call.refined_transcript && (
+                      <div className="text-xs text-muted-foreground mb-2 flex items-center gap-1">
+                        <span className="inline-block w-2 h-2 rounded-full bg-success" />
+                        Final Transcript
+                      </div>
+                    )}
+                    <div className={cn(
+                      "text-sm leading-relaxed text-foreground whitespace-pre-wrap",
+                      call.status === 'active' && "typewriter"
+                    )}>
+                      {displayedText}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-sm text-muted-foreground italic">
+                    {call.status === 'queued' && 'Waiting to connect...'}
+                    {call.status === 'ringing' && 'Ringing...'}
+                    {call.status === 'active' && 'Waiting for speech...'}
+                    {call.status === 'completed' && 'Call completed. No transcript available.'}
+                    {call.status === 'failed' && (call.error_message || 'Call failed.')}
+                  </div>
+                )}
              </motion.div>
            ) : (
              <motion.div
