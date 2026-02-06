@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { supabase } from '@/integrations/supabase/client';
 import { Dataset, Call, CSVRow } from '@/lib/types';
 import { formatPhoneNumber } from '@/lib/csv-parser';
@@ -214,15 +214,11 @@ export function useDispatch() {
     setIsStopped(false);
   }, []);
 
-  const selectedCall = useMemo(() => 
-    calls.find(c => c.id === selectedCallId) || null,
-    [calls, selectedCallId]
-  );
-
-  const progress = useMemo(() => {
-    if (!dataset?.total_calls) return 0;
-    return ((dataset.successful_calls + dataset.failed_calls) / dataset.total_calls) * 100;
-  }, [dataset?.total_calls, dataset?.successful_calls, dataset?.failed_calls]);
+  const selectedCall = calls.find(c => c.id === selectedCallId) || null;
+  
+  const progress = dataset?.total_calls 
+    ? ((dataset.successful_calls + dataset.failed_calls) / dataset.total_calls) * 100 
+    : 0;
 
   return {
     screen,
