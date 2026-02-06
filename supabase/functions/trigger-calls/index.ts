@@ -12,6 +12,7 @@ interface CallRecord {
   driver_name: string;
   phone_number: string;
   reg_no: string;
+  message: string | null;
   status: string;
 }
 
@@ -90,7 +91,7 @@ serve(async (req) => {
               dataset_id: dataset_id,
               driver_name: call.driver_name,
               reg_no: call.reg_no,
-              message: `Hello ${call.driver_name}, this is an automated dispatch call. Your vehicle registration number ${call.reg_no} has been confirmed for today's route. Please proceed to the dispatch point.`,
+              message: call.message || `Hello ${call.driver_name}, your vehicle ${call.reg_no} is ready for dispatch.`,
             },
           }),
         });

@@ -26,24 +26,26 @@
      return { data, errors };
    }
  
-   // Get column indices
-   const columnIndices = {
-     driver_name: headers.indexOf('driver_name'),
-     phone_number: headers.indexOf('phone_number'),
-     reg_no: headers.indexOf('reg_no'),
-   };
- 
-   // Parse data rows
-   for (let i = 1; i < lines.length; i++) {
-     const line = lines[i].trim();
-     if (!line) continue;
- 
-     const values = parseCSVLine(line);
-     const row: CSVRow = {
-       driver_name: values[columnIndices.driver_name]?.trim() || '',
-       phone_number: values[columnIndices.phone_number]?.trim() || '',
-       reg_no: values[columnIndices.reg_no]?.trim() || '',
-     };
+  // Get column indices
+  const columnIndices = {
+    driver_name: headers.indexOf('driver_name'),
+    phone_number: headers.indexOf('phone_number'),
+    reg_no: headers.indexOf('reg_no'),
+    message: headers.indexOf('message'),
+  };
+
+  // Parse data rows
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+
+    const values = parseCSVLine(line);
+    const row: CSVRow = {
+      driver_name: values[columnIndices.driver_name]?.trim() || '',
+      phone_number: values[columnIndices.phone_number]?.trim() || '',
+      reg_no: values[columnIndices.reg_no]?.trim() || '',
+      message: columnIndices.message >= 0 ? values[columnIndices.message]?.trim() || undefined : undefined,
+    };
  
      // Validate row
      if (!row.driver_name) {
