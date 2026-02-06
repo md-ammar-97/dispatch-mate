@@ -117,7 +117,10 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
-      [_ in never]: never
+      increment_dataset_counts: {
+        Args: { p_dataset_id: string; p_failed?: number; p_successful?: number }
+        Returns: undefined
+      }
     }
     Enums: {
       [_ in never]: never
