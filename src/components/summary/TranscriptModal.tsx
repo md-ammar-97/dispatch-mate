@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { X, Download, FileText } from 'lucide-react';
+import { useState, useRef } from 'react';
+import { Download, FileText, Play, Pause, Volume2 } from 'lucide-react';
 import { Call } from '@/lib/types';
 import { Button } from '@/components/ui/button';
 import {
@@ -16,6 +16,9 @@ interface TranscriptModalProps {
 }
 
 export function TranscriptModal({ call, open, onOpenChange }: TranscriptModalProps) {
+  const [isPlaying, setIsPlaying] = useState(false);
+  const audioRef = useRef<HTMLAudioElement>(null);
+
   const downloadTranscript = () => {
     if (!call) return;
     
@@ -43,10 +46,37 @@ ${call.refined_transcript || 'No transcript available'}
     URL.revokeObjectURL(url);
   };
 
+  const togglePlayback = () => {
+    if (!audioRef.current) return;
+    
+    if (isPlaying) {
+      audioRef.current.pause();
+    } else {
+      audioRef.current.play();
+    }
+    setIsPlaying(!isPlaying);
+  };
+
+  const handleAudioEnded = () => {
+    setIsPlaying(false);
+  };
+
+  // Reset playback state when modal closes or call changes
+  const handleOpenChange = (newOpen: boolean) => {
+    if (!newOpen) {
+      setIsPlaying(false);
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current.currentTime = 0;
+      }
+    }
+    onOpenChange(newOpen);
+  };
+
   if (!call) return null;
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent className="max-w-2xl max-h-[80vh] flex flex-col">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
@@ -76,6 +106,37 @@ ${call.refined_transcript || 'No transcript available'}
             </div>
           </div>
 
+          {/* Audio Player */}
+          {call.recording_url && (
+            <div className="flex items-center gap-3 p-3 rounded-lg border border-border bg-card">
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-10 w-10 p-0 rounded-full"
+                onClick={togglePlayback}
+              >
+                {isPlaying ? (
+                  <Pause className="w-4 h-4" />
+                ) : (
+                  <Play className="w-4 h-4 ml-0.5" />
+                )}
+              </Button>
+              <div className="flex-1">
+                <div className="flex items-center gap-2">
+                  <Volume2 className="w-4 h-4 text-muted-foreground" />
+                  <span className="text-sm font-medium">Call Recording</span>
+                </div>
+                <audio 
+                  ref={audioRef}
+                  src={call.recording_url}
+                  onEnded={handleAudioEnded}
+                  className="w-full mt-2"
+                  controls
+                />
+              </div>
+            </div>
+          )}
+
           {/* Transcript Content */}
           <div className="flex-1 overflow-auto max-h-[40vh] p-4 rounded-lg border border-border bg-card">
             {call.refined_transcript ? (
@@ -93,7 +154,7 @@ ${call.refined_transcript || 'No transcript available'}
           <div className="flex justify-end gap-2 pt-2">
             <Button
               variant="outline"
-              onClick={() => onOpenChange(false)}
+              onClick={() => handleOpenChange(false)}
             >
               Close
             </Button>
