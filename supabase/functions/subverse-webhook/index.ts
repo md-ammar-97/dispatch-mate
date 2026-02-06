@@ -27,6 +27,13 @@ interface SubverseWebhookPayload {
   };
 }
 
+interface SubverseCallDetails {
+  transcript?: string;
+  refinedTranscript?: string;
+  recordingUrl?: string;
+  duration?: number;
+}
+
 /**
  * Extract call identifier from payload with fallbacks
  */
@@ -38,6 +45,13 @@ function extractCallId(payload: SubverseWebhookPayload): string | null {
     payload.call_id ||
     null
   );
+}
+
+/**
+ * Extract the Subverse call ID for API fetching (callId or callSid)
+ */
+function extractSubverseCallId(payload: SubverseWebhookPayload): string | null {
+  return payload.callId || payload.callSid || payload.call_id || null;
 }
 
 /**
@@ -55,18 +69,62 @@ function extractRecordingUrl(payload: SubverseWebhookPayload): string | null {
 }
 
 /**
+ * Fetch call details from Subverse API as fallback
+ */
+async function fetchSubverseCallDetails(subverseCallId: string): Promise<SubverseCallDetails | null> {
+  const SUBVERSE_API_KEY = Deno.env.get("SUBVERSE_API_KEY");
+  if (!SUBVERSE_API_KEY) {
+    console.error("[Webhook] SUBVERSE_API_KEY not configured for fallback fetch");
+    return null;
+  }
+
+  try {
+    console.log(`[Webhook] Fetching call details from Subverse for: ${subverseCallId}`);
+    
+    const response = await fetch(
+      `https://api.subverseai.com/api/call/details/${subverseCallId}`,
+      {
+        method: "GET",
+        headers: {
+          "x-api-key": SUBVERSE_API_KEY,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+
+    if (!response.ok) {
+      console.error(`[Webhook] Subverse API error: ${response.status}`);
+      return null;
+    }
+
+    const data = await response.json();
+    console.log(`[Webhook] Subverse API response:`, JSON.stringify(data));
+
+    return {
+      transcript: data.transcript || data.refinedTranscript || data.refined_transcript,
+      refinedTranscript: data.refinedTranscript || data.refined_transcript || data.transcript,
+      recordingUrl: data.recordingUrl || data.recording_url,
+      duration: data.duration || data.call_duration,
+    };
+  } catch (error) {
+    console.error(`[Webhook] Error fetching from Subverse API:`, error);
+    return null;
+  }
+}
+
+/**
  * Find call by ID - attempts match on internal id first, then call_sid
  */
 async function findCall(
   supabase: ReturnType<typeof createClient>,
   callId: string
-): Promise<{ id: string; dataset_id: string; status: string } | null> {
+): Promise<{ id: string; dataset_id: string; status: string; call_sid: string | null } | null> {
   const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   
   if (uuidRegex.test(callId)) {
     const { data: callById } = await supabase
       .from("calls")
-      .select("id, dataset_id, status")
+      .select("id, dataset_id, status, call_sid")
       .eq("id", callId)
       .single();
     
@@ -75,7 +133,7 @@ async function findCall(
   
   const { data: callBySid } = await supabase
     .from("calls")
-    .select("id, dataset_id, status")
+    .select("id, dataset_id, status, call_sid")
     .eq("call_sid", callId)
     .single();
   
@@ -128,6 +186,7 @@ serve(async (req) => {
     console.log("[Webhook] Received event:", payload.event, "payload:", JSON.stringify(payload));
 
     const callId = extractCallId(payload);
+    const subverseCallId = extractSubverseCallId(payload);
     const datasetId = payload.metadata?.dataset_id;
 
     if (!callId) {
@@ -151,7 +210,7 @@ serve(async (req) => {
     const eventType = payload.event?.toLowerCase() || "";
     const resolvedDatasetId = datasetId || call.dataset_id;
 
-    // Only process call.completed events for post-call review model
+    // Only process terminal events for post-call review model
     if (eventType === "call.completed" || eventType === "call.ended" || eventType === "call_finished") {
       // Skip if already in terminal status (idempotent)
       if (["completed", "failed", "canceled"].includes(call.status)) {
@@ -162,7 +221,7 @@ serve(async (req) => {
         );
       }
 
-      console.log(`[Webhook] Call ${call.id} completed - updating refined_transcript`);
+      console.log(`[Webhook] Call ${call.id} completed - processing transcript`);
       
       const updateData: Record<string, unknown> = {
         status: "completed",
@@ -173,12 +232,29 @@ serve(async (req) => {
         updateData.call_duration = payload.duration;
       }
 
-      const recordingUrl = extractRecordingUrl(payload);
+      // Try to extract from payload first
+      let recordingUrl = extractRecordingUrl(payload);
+      let refinedTranscript = extractRefinedTranscript(payload);
+
+      // FALLBACK: If no transcript in payload, fetch from Subverse API
+      if (!refinedTranscript && subverseCallId) {
+        console.log(`[Webhook] No transcript in payload, fetching from Subverse API...`);
+        const details = await fetchSubverseCallDetails(subverseCallId);
+        
+        if (details) {
+          refinedTranscript = details.refinedTranscript || details.transcript || null;
+          recordingUrl = recordingUrl || details.recordingUrl || null;
+          
+          if (details.duration && !payload.duration) {
+            updateData.call_duration = details.duration;
+          }
+        }
+      }
+
       if (recordingUrl) {
         updateData.recording_url = recordingUrl;
       }
 
-      const refinedTranscript = extractRefinedTranscript(payload);
       if (refinedTranscript) {
         updateData.refined_transcript = refinedTranscript;
       }
