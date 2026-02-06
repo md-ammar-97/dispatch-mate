@@ -43,6 +43,8 @@ serve(async (req) => {
       );
     }
 
+    console.log(`[Trigger] Starting batch for dataset ${dataset_id}`);
+
     // Fetch all queued calls for this dataset
     const { data: calls, error: fetchError } = await supabase
       .from("calls")
@@ -60,7 +62,9 @@ serve(async (req) => {
       );
     }
 
-    // Process calls sequentially with delay
+    console.log(`[Trigger] Found ${calls.length} queued calls`);
+
+    // Process calls sequentially with delay (respecting 10-call concurrency limit)
     let successCount = 0;
     let failCount = 0;
 
@@ -68,32 +72,42 @@ serve(async (req) => {
       const call = calls[i] as CallRecord;
 
       try {
-        // Update status to ringing BEFORE making the API call
+        // Step 1: Update status to ringing BEFORE making the API call
         await supabase
           .from("calls")
-          .update({ status: "ringing", started_at: new Date().toISOString() })
+          .update({ 
+            status: "ringing", 
+            started_at: new Date().toISOString() 
+          })
           .eq("id", call.id);
 
-        console.log(`[Call ${call.id}] Status set to ringing, triggering Subverse API...`);
+        console.log(`[Call ${call.id}] Status set to ringing`);
 
-        // Trigger Subverse call with proper metadata mapping
+        // Step 2: Trigger Subverse call with proper metadata mapping
+        // The message field contains what the agent should speak
+        const subversePayload = {
+          phoneNumber: call.phone_number,
+          agentName: "sample_test_9",
+          metadata: {
+            call_id: call.id,
+            dataset_id: dataset_id,
+            driver_name: call.driver_name,
+            driver_phone: call.phone_number,
+            reg_no: call.reg_no,
+            // The message is what the Vikram agent will speak using ${message} placeholder
+            message: call.message || `Hello ${call.driver_name}, your vehicle ${call.reg_no} is ready for dispatch.`,
+          },
+        };
+
+        console.log(`[Call ${call.id}] Triggering Subverse with payload:`, JSON.stringify(subversePayload));
+
         const response = await fetch(SUBVERSE_API_URL, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
             "x-api-key": SUBVERSE_API_KEY,
           },
-          body: JSON.stringify({
-            phoneNumber: call.phone_number,
-            agentName: "sample_test_9",
-            metadata: {
-              call_id: call.id,
-              dataset_id: dataset_id,
-              driver_name: call.driver_name,
-              reg_no: call.reg_no,
-              message: call.message || `Hello ${call.driver_name}, your vehicle ${call.reg_no} is ready for dispatch.`,
-            },
-          }),
+          body: JSON.stringify(subversePayload),
         });
 
         if (!response.ok) {
@@ -104,9 +118,10 @@ serve(async (req) => {
         const result = await response.json();
         console.log(`[Call ${call.id}] Subverse response:`, JSON.stringify(result));
 
-        // Update call with active status and store the Subverse callId
+        // Step 3: Extract and store the Subverse call identifier
         const subverseCallId = result.callId || result.callSid || result.call_id || null;
         
+        // Step 4: Update call status to active and store the call_sid
         await supabase
           .from("calls")
           .update({
@@ -121,7 +136,7 @@ serve(async (req) => {
       } catch (error) {
         console.error(`[Call ${call.id}] Error:`, error);
 
-        // Update call as failed
+        // Update call as failed with error message
         await supabase
           .from("calls")
           .update({
@@ -141,8 +156,9 @@ serve(async (req) => {
         failCount++;
       }
 
-      // Delay between calls to respect concurrency limits (except for last call)
+      // Step 5: Delay between calls to respect concurrency limits (except for last call)
       if (i < calls.length - 1) {
+        console.log(`[Trigger] Waiting ${CALL_DELAY_MS}ms before next call...`);
         await new Promise((resolve) => setTimeout(resolve, CALL_DELAY_MS));
       }
     }
@@ -159,7 +175,7 @@ serve(async (req) => {
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   } catch (error) {
-    console.error("Error in trigger-calls:", error);
+    console.error("[Trigger] Fatal error:", error);
     return new Response(
       JSON.stringify({ error: error instanceof Error ? error.message : "Unknown error" }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
