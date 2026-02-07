@@ -17,9 +17,10 @@ import { TranscriptModal } from './TranscriptModal';
 interface CallHistoryTableProps {
   calls: Call[];
   onSelectCall: (id: string) => void;
+  onFetchTranscript?: (callId: string) => Promise<{ transcript?: string; recording_url?: string } | null>;
 }
 
-export function CallHistoryTable({ calls, onSelectCall }: CallHistoryTableProps) {
+export function CallHistoryTable({ calls, onSelectCall, onFetchTranscript }: CallHistoryTableProps) {
   const [filter, setFilter] = useState<'all' | 'completed' | 'failed'>('all');
   const [selectedCall, setSelectedCall] = useState<Call | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
@@ -115,9 +116,19 @@ export function CallHistoryTable({ calls, onSelectCall }: CallHistoryTableProps)
                         <Eye className="w-3.5 h-3.5" />
                         View
                       </Button>
+                    ) : call.status === 'completed' ? (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-7 gap-1.5 text-xs"
+                        onClick={() => openTranscriptModal(call)}
+                      >
+                        <Eye className="w-3.5 h-3.5" />
+                        View
+                      </Button>
                     ) : (
                       <span className="text-xs text-muted-foreground italic">
-                        {call.status === 'completed' ? 'No transcript' : 'Pending...'}
+                        {call.status === 'failed' ? 'Call failed' : 'Pending...'}
                       </span>
                     )}
                   </TableCell>
@@ -147,6 +158,7 @@ export function CallHistoryTable({ calls, onSelectCall }: CallHistoryTableProps)
         call={selectedCall}
         open={modalOpen}
         onOpenChange={setModalOpen}
+        onFetchTranscript={onFetchTranscript}
       />
     </>
   );

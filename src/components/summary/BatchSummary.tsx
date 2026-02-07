@@ -5,14 +5,15 @@
  import { CallHistoryTable } from './CallHistoryTable';
  import { cn } from '@/lib/utils';
  
- interface BatchSummaryProps {
-   dataset: Dataset;
-   calls: Call[];
-   onReset: () => void;
-   onSelectCall: (id: string) => void;
- }
- 
- export function BatchSummary({ dataset, calls, onReset, onSelectCall }: BatchSummaryProps) {
+interface BatchSummaryProps {
+  dataset: Dataset;
+  calls: Call[];
+  onReset: () => void;
+  onSelectCall: (id: string) => void;
+  onFetchTranscript?: (callId: string) => Promise<{ transcript?: string; recording_url?: string } | null>;
+}
+
+export function BatchSummary({ dataset, calls, onReset, onSelectCall, onFetchTranscript }: BatchSummaryProps) {
    const successRate = dataset.total_calls > 0 
      ? Math.round((dataset.successful_calls / dataset.total_calls) * 100) 
      : 0;
@@ -129,7 +130,7 @@
          animate={{ opacity: 1, y: 0 }}
          transition={{ delay: 0.2 }}
        >
-         <CallHistoryTable calls={calls} onSelectCall={onSelectCall} />
+         <CallHistoryTable calls={calls} onSelectCall={onSelectCall} onFetchTranscript={onFetchTranscript} />
        </motion.div>
      </motion.div>
    );
