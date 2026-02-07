@@ -4,19 +4,21 @@
  import { BatchSummary } from '@/components/summary/BatchSummary';
  import { PageTransition } from '@/components/layout/PageTransition';
  
- interface BatchSummaryScreenProps {
-   dataset: Dataset;
-   calls: Call[];
-   onReset: () => void;
-   onSelectCall: (id: string) => void;
- }
- 
- export function BatchSummaryScreen({
-   dataset,
-   calls,
-   onReset,
-   onSelectCall,
- }: BatchSummaryScreenProps) {
+interface BatchSummaryScreenProps {
+  dataset: Dataset;
+  calls: Call[];
+  onReset: () => void;
+  onSelectCall: (id: string) => void;
+  onFetchTranscript?: (callId: string) => Promise<{ transcript?: string; recording_url?: string } | null>;
+}
+
+export function BatchSummaryScreen({
+  dataset,
+  calls,
+  onReset,
+  onSelectCall,
+  onFetchTranscript,
+}: BatchSummaryScreenProps) {
    return (
      <PageTransition className="min-h-screen flex flex-col">
        {/* Header */}
@@ -36,12 +38,13 @@
  
        {/* Main content */}
        <main className="flex-1 container mx-auto px-6 py-6">
-         <BatchSummary
-           dataset={dataset}
-           calls={calls}
-           onReset={onReset}
-           onSelectCall={onSelectCall}
-         />
+          <BatchSummary
+            dataset={dataset}
+            calls={calls}
+            onReset={onReset}
+            onSelectCall={onSelectCall}
+            onFetchTranscript={onFetchTranscript}
+          />
        </main>
      </PageTransition>
    );

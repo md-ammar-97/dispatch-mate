@@ -1,5 +1,5 @@
 import { useState, useRef } from 'react';
-import { Download, FileText, Play, Pause, Volume2 } from 'lucide-react';
+import { Download, FileText, Play, Pause, Volume2, RefreshCw, Loader2 } from 'lucide-react';
 import { Call } from '@/lib/types';
 import { Button } from '@/components/ui/button';
 import {
@@ -13,11 +13,19 @@ interface TranscriptModalProps {
   call: Call | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  onFetchTranscript?: (callId: string) => Promise<{ transcript?: string; recording_url?: string } | null>;
 }
 
-export function TranscriptModal({ call, open, onOpenChange }: TranscriptModalProps) {
+export function TranscriptModal({ call, open, onOpenChange, onFetchTranscript }: TranscriptModalProps) {
   const [isPlaying, setIsPlaying] = useState(false);
+  const [isFetching, setIsFetching] = useState(false);
+  const [localTranscript, setLocalTranscript] = useState<string | null>(null);
+  const [localRecordingUrl, setLocalRecordingUrl] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
+
+  // Use local state if we fetched, otherwise use call data
+  const transcript = localTranscript || call?.refined_transcript;
+  const recordingUrl = localRecordingUrl || call?.recording_url;
 
   const downloadTranscript = () => {
     if (!call) return;
@@ -34,7 +42,7 @@ Date: ${new Date(call.created_at).toLocaleString()}
 
 --- TRANSCRIPT ---
 
-${call.refined_transcript || 'No transcript available'}
+${transcript || 'No transcript available'}
 `;
     
     const blob = new Blob([content], { type: 'text/plain' });
@@ -61,10 +69,31 @@ ${call.refined_transcript || 'No transcript available'}
     setIsPlaying(false);
   };
 
+  const handleFetchTranscript = async () => {
+    if (!call || !onFetchTranscript) return;
+    
+    setIsFetching(true);
+    try {
+      const result = await onFetchTranscript(call.id);
+      if (result) {
+        if (result.transcript) {
+          setLocalTranscript(result.transcript);
+        }
+        if (result.recording_url) {
+          setLocalRecordingUrl(result.recording_url);
+        }
+      }
+    } finally {
+      setIsFetching(false);
+    }
+  };
+
   // Reset playback state when modal closes or call changes
   const handleOpenChange = (newOpen: boolean) => {
     if (!newOpen) {
       setIsPlaying(false);
+      setLocalTranscript(null);
+      setLocalRecordingUrl(null);
       if (audioRef.current) {
         audioRef.current.pause();
         audioRef.current.currentTime = 0;
@@ -74,6 +103,8 @@ ${call.refined_transcript || 'No transcript available'}
   };
 
   if (!call) return null;
+
+  const showFetchButton = !transcript && call.status === 'completed' && onFetchTranscript;
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
@@ -107,7 +138,7 @@ ${call.refined_transcript || 'No transcript available'}
           </div>
 
           {/* Audio Player */}
-          {call.recording_url && (
+          {recordingUrl && (
             <div className="flex items-center gap-3 p-3 rounded-lg border border-border bg-card">
               <Button
                 size="sm"
@@ -128,7 +159,7 @@ ${call.refined_transcript || 'No transcript available'}
                 </div>
                 <audio 
                   ref={audioRef}
-                  src={call.recording_url}
+                  src={recordingUrl}
                   onEnded={handleAudioEnded}
                   className="w-full mt-2"
                   controls
@@ -139,14 +170,38 @@ ${call.refined_transcript || 'No transcript available'}
 
           {/* Transcript Content */}
           <div className="flex-1 overflow-auto max-h-[40vh] p-4 rounded-lg border border-border bg-card">
-            {call.refined_transcript ? (
+            {transcript ? (
               <p className="text-sm whitespace-pre-wrap leading-relaxed">
-                {call.refined_transcript}
+                {transcript}
               </p>
             ) : (
-              <p className="text-sm text-muted-foreground italic text-center py-8">
-                No transcript available for this call.
-              </p>
+              <div className="text-center py-8 space-y-4">
+                <p className="text-sm text-muted-foreground italic">
+                  {call.status === 'completed' 
+                    ? 'Transcript not available yet.' 
+                    : 'No transcript available for this call.'}
+                </p>
+                {showFetchButton && (
+                  <Button 
+                    variant="outline" 
+                    onClick={handleFetchTranscript}
+                    disabled={isFetching}
+                    className="gap-2"
+                  >
+                    {isFetching ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        Fetching...
+                      </>
+                    ) : (
+                      <>
+                        <RefreshCw className="w-4 h-4" />
+                        Fetch Transcript
+                      </>
+                    )}
+                  </Button>
+                )}
+              </div>
             )}
           </div>
 
@@ -158,7 +213,7 @@ ${call.refined_transcript || 'No transcript available'}
             >
               Close
             </Button>
-            {call.refined_transcript && (
+            {transcript && (
               <Button onClick={downloadTranscript} className="gap-2">
                 <Download className="w-4 h-4" />
                 Download .txt

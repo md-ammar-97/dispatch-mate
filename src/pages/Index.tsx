@@ -17,6 +17,7 @@ const Index = () => {
     startBatch,
     emergencyStop,
     resetToIntake,
+    fetchTranscript,
   } = useDispatch();
 
   return (
@@ -47,6 +48,7 @@ const Index = () => {
             calls={calls}
             onReset={resetToIntake}
             onSelectCall={setSelectedCallId}
+            onFetchTranscript={fetchTranscript}
           />
         )}
       </AnimatePresence>

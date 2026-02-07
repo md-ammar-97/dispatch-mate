@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { supabase } from '@/integrations/supabase/client';
 import { Dataset, Call, CSVRow } from '@/lib/types';
 import { formatPhoneNumber } from '@/lib/csv-parser';
@@ -7,6 +7,7 @@ import { toast } from 'sonner';
 export type Screen = 'intake' | 'command' | 'summary';
 
 const TERMINAL_STATUSES = ['completed', 'failed', 'canceled'];
+const STUCK_CALL_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 
 export function useDispatch() {
   const [screen, setScreen] = useState<Screen>('intake');
@@ -15,6 +16,9 @@ export function useDispatch() {
   const [selectedCallId, setSelectedCallId] = useState<string | null>(null);
   const [isExecuting, setIsExecuting] = useState(false);
   const [isStopped, setIsStopped] = useState(false);
+  
+  // Ref to track watchdog interval
+  const watchdogIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   // Subscribe to realtime updates for calls
   useEffect(() => {
@@ -94,8 +98,7 @@ export function useDispatch() {
   useEffect(() => {
     if (!dataset?.id || !isExecuting || calls.length === 0) return;
 
-    // Simple check without useMemo to avoid hook count issues
-    const allTerminal = calls.every(c => c.status === 'completed' || c.status === 'failed');
+    const allTerminal = calls.every(c => TERMINAL_STATUSES.includes(c.status));
 
     if (allTerminal) {
       console.log('[BatchWatcher] All calls terminal, navigating to summary');
@@ -104,6 +107,92 @@ export function useDispatch() {
       toast.success('Batch completed');
     }
   }, [calls, dataset?.id, isExecuting]);
+
+  // Watchdog: Reconcile stuck "active" calls
+  const reconcileStuckCalls = useCallback(async () => {
+    if (!dataset?.id || !isExecuting) return;
+
+    const stuckCalls = calls.filter(c => {
+      if (c.status !== 'active' || !c.started_at) return false;
+      const activeTime = Date.now() - new Date(c.started_at).getTime();
+      return activeTime > STUCK_CALL_TIMEOUT_MS;
+    });
+
+    if (stuckCalls.length === 0) return;
+
+    console.log(`[Watchdog] Found ${stuckCalls.length} stuck calls, attempting reconciliation`);
+
+    for (const call of stuckCalls) {
+      if (!call.call_sid) {
+        console.log(`[Watchdog] Call ${call.id} has no call_sid, marking as failed`);
+        await supabase
+          .from('calls')
+          .update({ 
+            status: 'failed', 
+            error_message: 'Call stuck without Subverse ID',
+            completed_at: new Date().toISOString()
+          })
+          .eq('id', call.id);
+        continue;
+      }
+
+      try {
+        console.log(`[Watchdog] Fetching status for stuck call ${call.id} (${call.call_sid})`);
+        
+        // Use our edge function to fetch and sync the call status
+        const { data, error } = await supabase.functions.invoke('fetch-transcript', {
+          body: { call_id: call.id },
+        });
+
+        if (error) {
+          console.error(`[Watchdog] Error fetching call ${call.id}:`, error);
+          // Mark as failed if we can't reconcile
+          await supabase
+            .from('calls')
+            .update({ 
+              status: 'failed', 
+              error_message: 'Could not reconcile stuck call',
+              completed_at: new Date().toISOString()
+            })
+            .eq('id', call.id);
+        } else {
+          console.log(`[Watchdog] Successfully reconciled call ${call.id}:`, data);
+          // If we got transcript data, mark as completed
+          if (data?.transcript) {
+            await supabase
+              .from('calls')
+              .update({ 
+                status: 'completed',
+                completed_at: new Date().toISOString()
+              })
+              .eq('id', call.id);
+          }
+        }
+      } catch (err) {
+        console.error(`[Watchdog] Exception reconciling call ${call.id}:`, err);
+      }
+    }
+  }, [calls, dataset?.id, isExecuting]);
+
+  // Start/stop watchdog interval
+  useEffect(() => {
+    if (isExecuting && dataset?.id) {
+      console.log('[Watchdog] Starting watchdog interval');
+      watchdogIntervalRef.current = setInterval(reconcileStuckCalls, 60000); // Check every minute
+      
+      return () => {
+        if (watchdogIntervalRef.current) {
+          clearInterval(watchdogIntervalRef.current);
+          watchdogIntervalRef.current = null;
+        }
+      };
+    } else {
+      if (watchdogIntervalRef.current) {
+        clearInterval(watchdogIntervalRef.current);
+        watchdogIntervalRef.current = null;
+      }
+    }
+  }, [isExecuting, dataset?.id, reconcileStuckCalls]);
 
   const initializeDataset = useCallback(async (data: CSVRow[]) => {
     try {
@@ -213,6 +302,41 @@ export function useDispatch() {
     setIsStopped(false);
   }, []);
 
+  // Manual fetch transcript for a specific call
+  const fetchTranscript = useCallback(async (callId: string) => {
+    try {
+      const { data, error } = await supabase.functions.invoke('fetch-transcript', {
+        body: { call_id: callId },
+      });
+
+      if (error) throw error;
+
+      if (data?.transcript) {
+        // Update local state
+        setCalls(prev => 
+          prev.map(c => 
+            c.id === callId 
+              ? { 
+                  ...c, 
+                  refined_transcript: data.transcript,
+                  recording_url: data.recording_url || c.recording_url
+                } 
+              : c
+          )
+        );
+        toast.success('Transcript fetched successfully');
+        return data;
+      } else {
+        toast.info('No transcript available yet');
+        return null;
+      }
+    } catch (error) {
+      console.error('Error fetching transcript:', error);
+      toast.error('Failed to fetch transcript');
+      return null;
+    }
+  }, []);
+
   const selectedCall = calls.find(c => c.id === selectedCallId) || null;
   
   const progress = dataset?.total_calls 
@@ -234,5 +358,6 @@ export function useDispatch() {
     startBatch,
     emergencyStop,
     resetToIntake,
+    fetchTranscript,
   };
 }
