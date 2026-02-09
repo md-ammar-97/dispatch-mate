@@ -64,7 +64,6 @@ serve(async (req) => {
 
     console.log(`[Trigger] Found ${calls.length} queued calls`);
 
-    // Process calls sequentially with delay (respecting 10-call concurrency limit)
     let successCount = 0;
     let failCount = 0;
 
@@ -83,23 +82,19 @@ serve(async (req) => {
 
         console.log(`[Call ${call.id}] Status set to ringing`);
 
-        // Step 2: Trigger Subverse call with proper metadata mapping
-        // The message field contains what the agent should speak
+        // Step 2: Trigger Subverse call
         const subversePayload = {
           phoneNumber: call.phone_number,
-          agentName: "sample_test_9",
+          agentName: "sample_test_9", // Ensure this matches your agent ID in Subverse
           metadata: {
             call_id: call.id,
             dataset_id: dataset_id,
             driver_name: call.driver_name,
             driver_phone: call.phone_number,
             reg_no: call.reg_no,
-            // The message is what the Vikram agent will speak using ${message} placeholder
             message: call.message || `Hello ${call.driver_name}, your vehicle ${call.reg_no} is ready for dispatch.`,
           },
         };
-
-        console.log(`[Call ${call.id}] Triggering Subverse with payload:`, JSON.stringify(subversePayload));
 
         const response = await fetch(SUBVERSE_API_URL, {
           method: "POST",
@@ -118,9 +113,14 @@ serve(async (req) => {
         const result = await response.json();
         console.log(`[Call ${call.id}] Subverse response:`, JSON.stringify(result));
 
-        // Step 3: Extract and store the Subverse call identifier
-        const subverseCallId = result.callId || result.callSid || result.call_id || null;
+        // FIX: Robust ID Extraction - Subverse puts ID in 'data' object usually
+        const subverseCallId = result.data?.callId || result.data?.call_id || result.callId || result.callSid || result.call_id || null;
         
+        if (!subverseCallId) {
+            console.warn(`[Call ${call.id}] Warning: Could not extract Subverse Call ID. Result was:`, JSON.stringify(result));
+            // We continue, but this call might be hard to stop later if ID is missing
+        }
+
         // Step 4: Update call status to active and store the call_sid
         await supabase
           .from("calls")
@@ -156,14 +156,11 @@ serve(async (req) => {
         failCount++;
       }
 
-      // Step 5: Delay between calls to respect concurrency limits (except for last call)
+      // Step 5: Throttle calls to avoid hitting rate limits
       if (i < calls.length - 1) {
-        console.log(`[Trigger] Waiting ${CALL_DELAY_MS}ms before next call...`);
         await new Promise((resolve) => setTimeout(resolve, CALL_DELAY_MS));
       }
     }
-
-    console.log(`[Dataset ${dataset_id}] Batch trigger complete. Success: ${successCount}, Failed: ${failCount}`);
 
     return new Response(
       JSON.stringify({
