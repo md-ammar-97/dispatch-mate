@@ -16,6 +16,7 @@ export type Database = {
     Tables: {
       calls: {
         Row: {
+          analysis_data: Json | null
           call_duration: number | null
           call_sid: string | null
           completed_at: string | null
@@ -32,8 +33,10 @@ export type Database = {
           reg_no: string
           started_at: string | null
           status: string
+          summary: string | null
         }
         Insert: {
+          analysis_data?: Json | null
           call_duration?: number | null
           call_sid?: string | null
           completed_at?: string | null
@@ -50,8 +53,10 @@ export type Database = {
           reg_no: string
           started_at?: string | null
           status?: string
+          summary?: string | null
         }
         Update: {
+          analysis_data?: Json | null
           call_duration?: number | null
           call_sid?: string | null
           completed_at?: string | null
@@ -68,6 +73,7 @@ export type Database = {
           reg_no?: string
           started_at?: string | null
           status?: string
+          summary?: string | null
         }
         Relationships: [
           {

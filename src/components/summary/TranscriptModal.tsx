@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
-import { Download, FileText, Play, Pause, Volume2, RefreshCw, Loader2 } from 'lucide-react';
+import { Download, FileText, Play, Pause, Volume2, RefreshCw, Loader2, CheckCircle } from 'lucide-react';
+import { cn } from '@/lib/utils';
 import { Call } from '@/lib/types';
 import { Button } from '@/components/ui/button';
 import {
@@ -180,7 +181,7 @@ ${transcript || 'No transcript available'}
               <div className="flex items-center gap-4">
                 <Button
                   size="icon"
-                  variant="primary"
+                  variant="default"
                   className="h-12 w-12 rounded-full shrink-0 shadow-lg"
                   onClick={togglePlayback}
                 >
