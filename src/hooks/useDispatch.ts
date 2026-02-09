@@ -35,9 +35,13 @@ export function useDispatch() {
         },
         (payload) => {
           const updatedCall = payload.new as Call;
-          setCalls(prev => 
-            prev.map(c => c.id === updatedCall.id ? updatedCall : c)
-          );
+          setCalls(prev => {
+            const index = prev.findIndex(c => c.id === updatedCall.id);
+            if (index === -1) return prev; // Don't add if not in current batch
+            const newCalls = [...prev];
+            newCalls[index] = { ...newCalls[index], ...updatedCall };
+            return newCalls;
+          });
         }
       )
       .subscribe();
@@ -104,6 +108,8 @@ export function useDispatch() {
 
     if (stuckCalls.length === 0) return;
 
+    console.log(`[Watchdog] Attempting to reconcile ${stuckCalls.length} calls`);
+
     for (const call of stuckCalls) {
       try {
         const { data, error } = await supabase.functions.invoke('fetch-transcript', {
@@ -111,13 +117,14 @@ export function useDispatch() {
         });
 
         if (error || !data?.transcript) {
+           console.warn(`[Watchdog] Reconcile failed for ${call.id}, marking as failed.`);
            await supabase.from('calls').update({ 
              status: 'failed', 
-             error_message: 'Call timed out / No response from Subverse' 
+             error_message: 'Call timed out / No response from provider' 
            }).eq('id', call.id);
         }
       } catch (err) {
-        console.error('Watchdog error:', err);
+        console.error('[Watchdog] Exception:', err);
       }
     }
   }, [calls, dataset?.id, isExecuting]);
@@ -125,13 +132,20 @@ export function useDispatch() {
   // 5. Watchdog Timer Lifecycle
   useEffect(() => {
     if (isExecuting && dataset?.id) {
+      if (watchdogIntervalRef.current) clearInterval(watchdogIntervalRef.current);
       watchdogIntervalRef.current = setInterval(reconcileStuckCalls, 60000);
     } else {
-      if (watchdogIntervalRef.current) clearInterval(watchdogIntervalRef.current);
+      if (watchdogIntervalRef.current) {
+        clearInterval(watchdogIntervalRef.current);
+        watchdogIntervalRef.current = null;
+      }
     }
 
     return () => {
-      if (watchdogIntervalRef.current) clearInterval(watchdogIntervalRef.current);
+      if (watchdogIntervalRef.current) {
+        clearInterval(watchdogIntervalRef.current);
+        watchdogIntervalRef.current = null;
+      }
     };
   }, [isExecuting, dataset?.id, reconcileStuckCalls]);
 
@@ -185,15 +199,21 @@ export function useDispatch() {
     setIsStopped(false);
 
     try {
-      await supabase.from('datasets').update({ status: 'executing' }).eq('id', dataset.id);
+      const { error: dsError } = await supabase
+        .from('datasets')
+        .update({ status: 'executing' })
+        .eq('id', dataset.id);
+      
+      if (dsError) throw dsError;
 
-      const { error } = await supabase.functions.invoke('trigger-calls', {
+      const { error: fnError } = await supabase.functions.invoke('trigger-calls', {
         body: { dataset_id: dataset.id },
       });
 
-      if (error) throw error;
+      if (fnError) throw fnError;
       toast.success('Batch execution started');
     } catch (error) {
+      console.error('Error starting batch:', error);
       setIsExecuting(false);
       toast.error('Failed to start batch execution');
     }
@@ -204,15 +224,20 @@ export function useDispatch() {
     setIsStopped(true);
 
     try {
-      await supabase.from('datasets').update({ status: 'failed', completed_at: new Date().toISOString() }).eq('id', dataset.id);
-      await supabase.from('calls')
-        .update({ status: 'failed', error_message: 'Emergency stop triggered' })
-        .eq('dataset_id', dataset.id)
-        .in('status', ['queued', 'ringing', 'active']);
+      await Promise.all([
+        supabase.from('datasets')
+          .update({ status: 'failed', completed_at: new Date().toISOString() })
+          .eq('id', dataset.id),
+        supabase.from('calls')
+          .update({ status: 'failed', error_message: 'Emergency stop triggered' })
+          .eq('dataset_id', dataset.id)
+          .in('status', ['queued', 'ringing', 'active'])
+      ]);
 
       toast.warning('Emergency stop executed');
       setIsExecuting(false);
     } catch (error) {
+      console.error('Error in emergency stop:', error);
       toast.error('Failed to stop batch');
     }
   }, [dataset]);
@@ -236,7 +261,11 @@ export function useDispatch() {
 
       if (data?.transcript) {
         setCalls(prev => prev.map(c => 
-          c.id === callId ? { ...c, refined_transcript: data.transcript, recording_url: data.recording_url || c.recording_url } : c
+          c.id === callId ? { 
+            ...c, 
+            refined_transcript: data.transcript, 
+            recording_url: data.recording_url || c.recording_url 
+          } : c
         ));
         toast.success('Transcript fetched');
         return data;
@@ -244,6 +273,7 @@ export function useDispatch() {
       toast.info('No transcript available yet');
       return null;
     } catch (error) {
+      console.error('Error fetching transcript:', error);
       toast.error('Failed to fetch transcript');
       return null;
     }
