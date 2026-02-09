@@ -11,6 +11,24 @@ interface FetchTranscriptRequest {
   call_id: string;
 }
 
+function mapSubverseStatus(subverseStatus: string): string {
+  const statusMap: Record<string, string> = {
+    "ringing": "ringing",
+    "in_progress": "active",
+    "in-progress": "active",
+    "active": "active",
+    "connected": "active",
+    "completed": "completed",
+    "ended": "completed",
+    "call_finished": "completed",
+    "failed": "failed",
+    "no_answer": "failed",
+    "busy": "failed",
+    "canceled": "canceled",
+  };
+  return statusMap[subverseStatus.toLowerCase()] || subverseStatus;
+}
+
 serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
@@ -109,12 +127,18 @@ serve(async (req) => {
     const transcript = data.refinedTranscript || data.refined_transcript || data.transcript || null;
     const recordingUrl = data.recordingUrl || data.recording_url || data.call_recording_url || null;
     const duration = data.duration || data.call_duration || null;
+    const subverseStatus = data.status || data.call_status || null;
+    const mappedStatus = subverseStatus ? mapSubverseStatus(subverseStatus) : null;
 
     // Update the call in database
     const updateData: Record<string, unknown> = {};
     if (transcript) updateData.refined_transcript = transcript;
     if (recordingUrl) updateData.recording_url = recordingUrl;
     if (duration) updateData.call_duration = duration;
+    if (mappedStatus) updateData.status = mappedStatus;
+    if (mappedStatus && ["completed", "failed", "canceled"].includes(mappedStatus)) {
+      updateData.completed_at = new Date().toISOString();
+    }
 
     if (Object.keys(updateData).length > 0) {
       await supabase

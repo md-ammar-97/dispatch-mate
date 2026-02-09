@@ -224,12 +224,26 @@ export function useDispatch() {
     setIsStopped(true);
 
     try {
+      const stoppableCalls = calls.filter(call =>
+        ['queued', 'ringing', 'active'].includes(call.status)
+      );
+
+      await Promise.all(
+        stoppableCalls
+          .filter(call => ['ringing', 'active'].includes(call.status))
+          .map(call =>
+            supabase.functions.invoke('stop-call', {
+              body: { call_id: call.id },
+            })
+          )
+      );
+
       await Promise.all([
         supabase.from('datasets')
           .update({ status: 'failed', completed_at: new Date().toISOString() })
           .eq('id', dataset.id),
         supabase.from('calls')
-          .update({ status: 'failed', error_message: 'Emergency stop triggered' })
+          .update({ status: 'canceled', error_message: 'Emergency stop triggered' })
           .eq('dataset_id', dataset.id)
           .in('status', ['queued', 'ringing', 'active'])
       ]);
