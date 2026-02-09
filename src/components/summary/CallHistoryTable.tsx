@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { motion } from 'framer-motion';
-import { Play, Download, Eye, CheckCircle, XCircle, Clock } from 'lucide-react';
+import { Play, Download, Eye, CheckCircle, XCircle, Clock, RefreshCw } from 'lucide-react';
 import { Call } from '@/lib/types';
 import { Button } from '@/components/ui/button';
 import {
@@ -43,6 +43,17 @@ export function CallHistoryTable({ calls, onSelectCall, onFetchTranscript }: Cal
     setModalOpen(true);
   };
 
+  const handleDownload = (call: Call) => {
+    if (!call.refined_transcript) return;
+    const element = document.createElement("a");
+    const file = new Blob([call.refined_transcript], { type: 'text/plain' });
+    element.href = URL.createObjectURL(file);
+    element.download = `transcript-${call.reg_no}-${call.id.slice(0, 8)}.txt`;
+    document.body.appendChild(element);
+    element.click();
+    document.body.removeChild(element);
+  };
+
   return (
     <>
       <div className="rounded-xl border border-border bg-card overflow-hidden">
@@ -74,81 +85,102 @@ export function CallHistoryTable({ calls, onSelectCall, onFetchTranscript }: Cal
                 <TableHead>Driver</TableHead>
                 <TableHead className="w-[100px]">Status</TableHead>
                 <TableHead className="w-[100px]">Duration</TableHead>
-                <TableHead className="w-[150px]">Transcript</TableHead>
-                <TableHead className="w-[100px] text-right">Actions</TableHead>
+                <TableHead className="w-[180px]">Transcript</TableHead>
+                <TableHead className="w-[120px] text-right">Actions</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {filteredCalls.map((call, i) => (
-                <motion.tr
-                  key={call.id}
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  transition={{ delay: i * 0.02 }}
-                  className="border-b border-border/50 last:border-0 hover:bg-muted/30 transition-colors"
-                >
-                  <TableCell className="font-mono font-bold text-primary">
-                    {call.reg_no}
+              {filteredCalls.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={6} className="h-24 text-center text-muted-foreground italic">
+                    No call history found.
                   </TableCell>
-                  <TableCell>
-                    <div>
-                      <p className="font-medium">{call.driver_name}</p>
-                      <p className="text-xs text-muted-foreground">{call.phone_number}</p>
-                    </div>
-                  </TableCell>
-                  <TableCell>
-                    <div className="flex items-center gap-1.5">
-                      {statusIcon[call.status]}
-                      <span className="text-xs capitalize">{call.status}</span>
-                    </div>
-                  </TableCell>
-                  <TableCell className="text-sm text-muted-foreground">
-                    {call.call_duration ? `${call.call_duration}s` : '-'}
-                  </TableCell>
-                  <TableCell>
-                    {call.refined_transcript ? (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="h-7 gap-1.5 text-xs"
-                        onClick={() => openTranscriptModal(call)}
-                      >
-                        <Eye className="w-3.5 h-3.5" />
-                        View
-                      </Button>
-                    ) : call.status === 'completed' ? (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="h-7 gap-1.5 text-xs"
-                        onClick={() => openTranscriptModal(call)}
-                      >
-                        <Eye className="w-3.5 h-3.5" />
-                        View
-                      </Button>
-                    ) : (
-                      <span className="text-xs text-muted-foreground italic">
-                        {call.status === 'failed' ? 'Call failed' : 'Pending...'}
-                      </span>
-                    )}
-                  </TableCell>
-                  <TableCell className="text-right">
-                    <div className="flex justify-end gap-1">
-                      {call.recording_url && (
+                </TableRow>
+              ) : (
+                filteredCalls.map((call, i) => (
+                  <motion.tr
+                    key={call.id}
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    transition={{ delay: i * 0.02 }}
+                    className="border-b border-border/50 last:border-0 hover:bg-muted/30 transition-colors"
+                  >
+                    <TableCell className="font-mono font-bold text-primary">
+                      {call.reg_no}
+                    </TableCell>
+                    <TableCell>
+                      <div>
+                        <p className="font-medium">{call.driver_name}</p>
+                        <p className="text-xs text-muted-foreground">{call.phone_number}</p>
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex items-center gap-1.5">
+                        {statusIcon[call.status as keyof typeof statusIcon] || <Clock className="w-4 h-4" />}
+                        <span className="text-xs capitalize">{call.status}</span>
+                      </div>
+                    </TableCell>
+                    <TableCell className="text-sm text-muted-foreground">
+                      {call.call_duration ? `${call.call_duration}s` : '-'}
+                    </TableCell>
+                    <TableCell>
+                      {call.status === 'completed' ? (
                         <Button
                           size="sm"
-                          variant="ghost"
-                          className="h-7 w-7 p-0"
-                          title="Play recording"
-                          onClick={() => window.open(call.recording_url!, '_blank')}
+                          variant="outline"
+                          className={cn(
+                            "h-7 gap-1.5 text-xs",
+                            !call.refined_transcript && "border-warning/50 text-warning hover:bg-warning/10"
+                          )}
+                          onClick={() => openTranscriptModal(call)}
                         >
-                          <Play className="w-3.5 h-3.5" />
+                          {call.refined_transcript ? (
+                            <>
+                              <Eye className="w-3.5 h-3.5" />
+                              View
+                            </>
+                          ) : (
+                            <>
+                              <RefreshCw className="w-3.5 h-3.5 animate-pulse" />
+                              Fetch Summary
+                            </>
+                          )}
                         </Button>
+                      ) : (
+                        <span className="text-xs text-muted-foreground italic">
+                          {call.status === 'failed' ? 'Call failed' : 'In Progress...'}
+                        </span>
                       )}
-                    </div>
-                  </TableCell>
-                </motion.tr>
-              ))}
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <div className="flex justify-end gap-1">
+                        {call.refined_transcript && (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="h-7 w-7 p-0"
+                            title="Download Transcript"
+                            onClick={() => handleDownload(call)}
+                          >
+                            <Download className="w-3.5 h-3.5" />
+                          </Button>
+                        )}
+                        {call.recording_url && (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="h-7 w-7 p-0"
+                            title="Play recording"
+                            onClick={() => window.open(call.recording_url!, '_blank')}
+                          >
+                            <Play className="w-3.5 h-3.5" />
+                          </Button>
+                        )}
+                      </div>
+                    </TableCell>
+                  </motion.tr>
+                ))
+              )}
             </TableBody>
           </Table>
         </div>
