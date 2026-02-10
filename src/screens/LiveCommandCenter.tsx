@@ -36,8 +36,9 @@ export function LiveCommandCenter({
       {/* Header */}
       <header className="border-b border-border bg-card/50 backdrop-blur-sm sticky top-0 z-10">
         <div className="container mx-auto px-6 py-4">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
+          <div className="flex items-center">
+            {/* Left: Title */}
+            <div className="flex items-center gap-3 flex-1">
               <div className="p-2 rounded-xl bg-primary/10">
                 <Radio className="w-6 h-6 text-primary" />
               </div>
@@ -49,8 +50,8 @@ export function LiveCommandCenter({
               </div>
             </div>
 
-            {/* Control buttons */}
-            <div className="flex items-center gap-3">
+            {/* Center: Start / Executing */}
+            <div className="flex-1 flex justify-center">
               {!isExecuting ? (
                 <Button
                   size="lg"
@@ -68,6 +69,9 @@ export function LiveCommandCenter({
                 </div>
               )}
             </div>
+
+            {/* Right: spacer for logout button area */}
+            <div className="flex-1" />
           </div>
         </div>
       </header>

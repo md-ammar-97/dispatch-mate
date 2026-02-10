@@ -19,6 +19,7 @@ export type Database = {
           analysis_data: Json | null
           call_duration: number | null
           call_sid: string | null
+          client_timestamp: string | null
           completed_at: string | null
           created_at: string
           dataset_id: string
@@ -39,6 +40,7 @@ export type Database = {
           analysis_data?: Json | null
           call_duration?: number | null
           call_sid?: string | null
+          client_timestamp?: string | null
           completed_at?: string | null
           created_at?: string
           dataset_id: string
@@ -59,6 +61,7 @@ export type Database = {
           analysis_data?: Json | null
           call_duration?: number | null
           call_sid?: string | null
+          client_timestamp?: string | null
           completed_at?: string | null
           created_at?: string
           dataset_id?: string

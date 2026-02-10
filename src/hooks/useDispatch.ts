@@ -170,6 +170,7 @@ export function useDispatch() {
 
       if (datasetError) throw datasetError;
 
+      const clientTimestamp = new Date().toISOString();
       const callRecords = data.map(row => ({
         dataset_id: newDataset.id,
         driver_name: row.driver_name,
@@ -177,6 +178,7 @@ export function useDispatch() {
         reg_no: row.reg_no,
         message: row.message || null,
         status: 'queued' as const,
+        client_timestamp: clientTimestamp,
       }));
 
       const { data: newCalls, error: callsError } = await supabase
@@ -253,6 +255,26 @@ export function useDispatch() {
     }
   }, []);
 
+  const fetchCallHistory = useCallback(async () => {
+    try {
+      const thirtyDaysAgo = new Date();
+      thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+      const { data, error } = await supabase
+        .from('calls')
+        .select('*')
+        .gte('created_at', thirtyDaysAgo.toISOString())
+        .order('created_at', { ascending: false });
+
+      if (error) throw error;
+      return (data as Call[]) || [];
+    } catch (error) {
+      console.error('Error fetching call history:', error);
+      toast.error('Failed to fetch call history');
+      return [];
+    }
+  }, []);
+
   const selectedCall = calls.find(c => c.id === selectedCallId) || null;
   const progress = dataset?.total_calls 
     ? (((dataset.successful_calls ?? 0) + (dataset.failed_calls ?? 0)) / dataset.total_calls) * 100 
@@ -261,6 +283,6 @@ export function useDispatch() {
   return {
     screen, setScreen, dataset, calls, selectedCall, selectedCallId,
     setSelectedCallId, isExecuting, progress,
-    initializeDataset, startBatch, resetToIntake, fetchTranscript
+    initializeDataset, startBatch, resetToIntake, fetchTranscript, fetchCallHistory
   };
 }

@@ -28,6 +28,7 @@ export interface Call {
   created_at: string;
   started_at: string | null;
   completed_at: string | null;
+  client_timestamp: string | null;
 }
 
 export interface CSVRow {
