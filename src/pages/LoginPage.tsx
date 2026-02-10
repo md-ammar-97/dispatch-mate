@@ -7,7 +7,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { toast } from "sonner";
 
 const HERO_IMAGE =
-  "https://res.cloudinary.com/dr3sbzhsv/image/upload/v1770709490/Axestrack_Bot_Login_Page_nmp6hp.webp";
+  "https://res.cloudinary.com/dr3sbzhsv/image/upload/v1770715406/Axestrack_Bot_Login_Page_N_vbjmgq.webp";
 
 function generateCaptcha() {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789";
