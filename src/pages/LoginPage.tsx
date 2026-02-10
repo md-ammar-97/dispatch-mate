@@ -21,7 +21,7 @@ const LoginPage: React.FC = () => {
   // We only need session from context to check if already logged in
   const { session } = useAuth(); 
 
-  const [email, setEmail] = useState(""); // Changed from username to email for Supabase
+  const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [captcha, setCaptcha] = useState(generateCaptcha);
@@ -41,7 +41,7 @@ const LoginPage: React.FC = () => {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     
-    if (!email.trim() || !password.trim()) {
+    if (!username.trim() || !password.trim()) {
       toast.error("Please fill in all fields");
       return;
     }
@@ -54,10 +54,12 @@ const LoginPage: React.FC = () => {
 
     setIsLoading(true);
 
+    const email = `${username.trim()}@dispatchmate.local`;
+
     try {
       const { data, error } = await supabase.auth.signInWithPassword({
-        email: email,
-        password: password,
+        email,
+        password,
       });
 
       if (error) {
@@ -91,15 +93,15 @@ const LoginPage: React.FC = () => {
         <form onSubmit={handleSubmit} className="w-full max-w-sm space-y-6">
           <h1 className="text-2xl font-semibold text-white">Login to your account</h1>
 
-          {/* Email */}
+          {/* Username */}
           <div className="space-y-1.5">
-            <label className="text-sm text-gray-400">Email Address</label>
+            <label className="text-sm text-gray-400">Username</label>
             <input
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
+              type="text"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
               className="w-full rounded-md border border-[#333] bg-[#2a2a3e] px-3 py-2.5 text-sm text-white placeholder:text-gray-500 focus:border-[#6366f1] focus:outline-none"
-              placeholder="name@example.com"
+              placeholder="Enter your username"
               disabled={isLoading}
             />
           </div>

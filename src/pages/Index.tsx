@@ -3,7 +3,8 @@ import { useDispatch } from '@/hooks/useDispatch';
 import { CSVIntake } from '@/screens/CSVIntake';
 import { LiveCommandCenter } from '@/screens/LiveCommandCenter';
 import { BatchSummaryScreen } from '@/screens/BatchSummaryScreen';
-import { LogoutButton } from '@/components/auth/LogoutButton'; // Import it
+import { LogoutButton } from '@/components/auth/LogoutButton';
+import { ChangePasswordModal } from '@/components/auth/ChangePasswordModal';
 
 const Index = () => {
   const {
@@ -18,6 +19,7 @@ const Index = () => {
     startBatch,
     resetToIntake,
     fetchTranscript,
+    fetchCallHistory,
   } = useDispatch();
 
   return (
@@ -25,7 +27,8 @@ const Index = () => {
       {/* OPTION A: Floating Logout Button (Top Right)
          This ensures it is always accessible regardless of the screen 
       */}
-      <div className="fixed top-4 right-4 z-50">
+      <div className="fixed top-4 right-4 z-50 flex items-center gap-2">
+        <ChangePasswordModal />
         <LogoutButton />
       </div>
 
@@ -55,6 +58,7 @@ const Index = () => {
             onReset={resetToIntake}
             onSelectCall={setSelectedCallId}
             onFetchTranscript={fetchTranscript}
+            onFetchCallHistory={fetchCallHistory}
           />
         )}
       </AnimatePresence>
