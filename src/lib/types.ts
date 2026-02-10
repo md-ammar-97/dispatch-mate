@@ -18,7 +18,7 @@ export interface Call {
   phone_number: string;
   reg_no: string;
   message: string | null;
-  status: 'queued' | 'ringing' | 'active' | 'completed' | 'failed';
+  status: 'queued' | 'ringing' | 'active' | 'completed' | 'failed' | 'canceled';
   live_transcript: string;
   refined_transcript: string | null;
   recording_url: string | null;
