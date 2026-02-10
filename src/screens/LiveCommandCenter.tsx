@@ -1,12 +1,11 @@
 import { motion } from 'framer-motion';
-import { Play, StopCircle, Radio, Loader2 } from 'lucide-react';
+import { Play, Radio, Loader2 } from 'lucide-react';
 import { Dataset, Call } from '@/lib/types';
 import { Button } from '@/components/ui/button';
 import { CallCard } from '@/components/calls/CallCard';
 import { TranscriptPanel } from '@/components/calls/TranscriptPanel';
 import { ProgressBar } from '@/components/layout/ProgressBar';
 import { PageTransition } from '@/components/layout/PageTransition';
-import { supabase } from "@/integrations/supabase/client";
 
 interface LiveCommandCenterProps {
   dataset: Dataset;
@@ -16,7 +15,6 @@ interface LiveCommandCenterProps {
   isExecuting: boolean;
   progress: number;
   onStartBatch: () => void;
-  onEmergencyStop: () => void;
 }
 
 export function LiveCommandCenter({
@@ -27,24 +25,9 @@ export function LiveCommandCenter({
   isExecuting,
   progress,
   onStartBatch,
-  onEmergencyStop,
 }: LiveCommandCenterProps) {
   const activeCalls = calls.filter(c => c.status === 'active').length;
   const completedCalls = calls.filter(c => c.status === 'completed' || c.status === 'failed').length;
-
-  // New function to handle the API stop calls + UI state update
-  const handleEmergencyStop = async () => {
-    // Loop through all active calls and kill them via the Edge Function
-    const activeCalls = calls.filter(c => c.status === 'active');
-    
-    // Fire the stop requests in parallel
-    await Promise.all(activeCalls.map(call => 
-      supabase.functions.invoke('stop-call', { body: { call_id: call.id } })
-    ));
-
-    // CRITICAL: Call the original prop to ensure the UI updates (stops the spinner, etc.)
-    onEmergencyStop();
-  };
 
   return (
     <PageTransition className="min-h-screen flex flex-col">
@@ -79,15 +62,10 @@ export function LiveCommandCenter({
                   Start Batch
                 </Button>
               ) : (
-                <Button
-                  size="lg"
-                  variant="emergency"
-                  onClick={handleEmergencyStop} // Updated to use the new handler
-                  className="gap-2"
-                >
-                  <StopCircle className="w-4 h-4" />
-                  Emergency Stop
-                </Button>
+                <div className="flex items-center gap-2 px-4 py-2 bg-muted/50 rounded-lg border border-border">
+                  <Loader2 className="w-4 h-4 animate-spin text-primary" />
+                  <span className="text-sm font-medium text-muted-foreground">Executing Batch...</span>
+                </div>
               )}
             </div>
           </div>
