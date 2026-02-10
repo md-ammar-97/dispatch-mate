@@ -85,7 +85,7 @@ serve(async (req) => {
         // Step 2: Trigger Subverse call
         const subversePayload = {
           phoneNumber: call.phone_number,
-          agentName: "srl_bot_1", // Ensure this matches your agent ID in Subverse
+          agentName: "sample_test_9", // Ensure this matches your agent ID in Subverse
           metadata: {
             call_id: call.id,
             dataset_id: dataset_id,
