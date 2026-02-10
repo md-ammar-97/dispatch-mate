@@ -37,7 +37,7 @@ export function useDispatch() {
           const updatedCall = payload.new as Call;
           setCalls(prev => {
             const index = prev.findIndex(c => c.id === updatedCall.id);
-            if (index === -1) return prev; // Don't add if not in current batch
+            if (index === -1) return prev; // Safety: only update calls in current local batch
             const newCalls = [...prev];
             newCalls[index] = { ...newCalls[index], ...updatedCall };
             return newCalls;
@@ -108,7 +108,7 @@ export function useDispatch() {
 
     if (stuckCalls.length === 0) return;
 
-    console.log(`[Watchdog] Attempting to reconcile ${stuckCalls.length} calls`);
+    console.log(`[Watchdog] Attempting to reconcile ${stuckCalls.length} stuck calls`);
 
     for (const call of stuckCalls) {
       try {
@@ -117,23 +117,23 @@ export function useDispatch() {
         });
 
         if (error || !data?.transcript) {
-           console.warn(`[Watchdog] Reconcile failed for ${call.id}, marking as failed.`);
+           console.warn(`[Watchdog] Reconciliation failed for ${call.id}`);
            await supabase.from('calls').update({ 
              status: 'failed', 
-             error_message: 'Call timed out / No response from provider' 
+             error_message: 'Provider timeout (Reconciliation)' 
            }).eq('id', call.id);
         }
       } catch (err) {
-        console.error('[Watchdog] Exception:', err);
+        console.error('[Watchdog] Error:', err);
       }
     }
   }, [calls, dataset?.id, isExecuting]);
 
-  // 5. Watchdog Timer Lifecycle
+  // 5. Watchdog Timer Lifecycle Management
   useEffect(() => {
     if (isExecuting && dataset?.id) {
       if (watchdogIntervalRef.current) clearInterval(watchdogIntervalRef.current);
-      watchdogIntervalRef.current = setInterval(reconcileStuckCalls, 60000);
+      watchdogIntervalRef.current = setInterval(reconcileStuckCalls, 60000); // Check once per minute
     } else {
       if (watchdogIntervalRef.current) {
         clearInterval(watchdogIntervalRef.current);
@@ -148,8 +148,6 @@ export function useDispatch() {
       }
     };
   }, [isExecuting, dataset?.id, reconcileStuckCalls]);
-
-  // --- Core Functionalities ---
 
   const initializeDataset = useCallback(async (data: CSVRow[]) => {
     try {
@@ -199,18 +197,13 @@ export function useDispatch() {
     setIsStopped(false);
 
     try {
-      const { error: dsError } = await supabase
-        .from('datasets')
-        .update({ status: 'executing' })
-        .eq('id', dataset.id);
-      
-      if (dsError) throw dsError;
+      await supabase.from('datasets').update({ status: 'executing' }).eq('id', dataset.id);
 
-      const { error: fnError } = await supabase.functions.invoke('trigger-calls', {
+      const { error } = await supabase.functions.invoke('trigger-calls', {
         body: { dataset_id: dataset.id },
       });
 
-      if (fnError) throw fnError;
+      if (error) throw error;
       toast.success('Batch execution started');
     } catch (error) {
       console.error('Error starting batch:', error);
@@ -224,19 +217,17 @@ export function useDispatch() {
     setIsStopped(true);
 
     try {
-      // 1. First trigger the stop-call function for all active/ringing calls
+      // 1. Identify calls that can be stopped at provider level
       const stoppableCalls = calls.filter(call => 
         ['ringing', 'active'].includes(call.status)
       );
 
-      // We don't await this blocking the UI update, but we fire them off
-      stoppableCalls.map(call => 
-        supabase.functions.invoke('stop-call', {
-          body: { call_id: call.id },
-        })
+      // 2. Fire and forget provider-level stops
+      stoppableCalls.forEach(call => 
+        supabase.functions.invoke('stop-call', { body: { call_id: call.id } })
       );
 
-      // 2. Then update DB status to reflect cancellation immediately
+      // 3. Force Database update to reflect cancellation
       await Promise.all([
         supabase.from('datasets')
           .update({ status: 'failed', completed_at: new Date().toISOString() })
@@ -253,7 +244,7 @@ export function useDispatch() {
       console.error('Error in emergency stop:', error);
       toast.error('Failed to stop batch');
     }
-  }, [dataset, calls]); // Added 'calls' dependency
+  }, [dataset, calls]);
 
   const resetToIntake = useCallback(() => {
     setScreen('intake');
@@ -294,7 +285,7 @@ export function useDispatch() {
 
   const selectedCall = calls.find(c => c.id === selectedCallId) || null;
   const progress = dataset?.total_calls 
-    ? ((dataset.successful_calls + dataset.failed_calls) / dataset.total_calls) * 100 
+    ? (((dataset.successful_calls ?? 0) + (dataset.failed_calls ?? 0)) / dataset.total_calls) * 100 
     : 0;
 
   return {
