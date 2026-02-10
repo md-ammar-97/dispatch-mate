@@ -23,18 +23,19 @@ serve(async (req) => {
         throw new Error("Call not found in database");
     }
 
-    // 1. Try to cancel on Subverse IF we have a call_sid
+    // 1. Try to cancel on Subverse IF we have a call_sid (Subverse ID)
     if (call.call_sid) {
         try {
             console.log(`[Stop Call] Attempting to cancel Subverse call: ${call.call_sid}`);
-            // Use the correct endpoint for direct call cancellation
-            const response = await fetch(`https://api.subverseai.com/api/direct-call/cancel`, {
+            
+            // Updated to use the requested endpoint format: PUT /call/cancel/{callId}
+            const response = await fetch(`https://api.subverseai.com/api/call/cancel/${call.call_sid}`, {
               method: "PUT",
               headers: {
                 "x-api-key": SUBVERSE_API_KEY!,
                 "Content-Type": "application/json",
               },
-              body: JSON.stringify({ callId: call.call_sid })
+              body: JSON.stringify({}) // Empty body as ID is now in the URL
             });
             
             if (!response.ok) {
@@ -47,16 +48,17 @@ serve(async (req) => {
             console.error("[Stop Call] Network Error contacting Subverse:", err);
         }
     } else {
+        // If we don't have a call_sid (e.g. call was stuck in 'queued' before trigger), we can't call the API.
+        // We just proceed to fail it locally.
         console.warn("[Stop Call] No Subverse Call ID found. Forcing local status update only.");
     }
 
-    // 2. Always force update DB status to 'failed' (or 'canceled') to stop UI spinner
-    // This ensures the platform "stops running" even if the API call failed
+    // 2. Always force update DB status to 'failed' to ensure the batch doesn't hang
     const { error: updateError } = await supabase
         .from("calls")
         .update({ 
             status: 'failed', 
-            error_message: 'Emergency Stop by User',
+            error_message: 'Stopped by System (Timeout)',
             completed_at: new Date().toISOString()
         })
         .eq("id", call_id);
