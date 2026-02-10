@@ -7,7 +7,7 @@ import { toast } from 'sonner';
 export type Screen = 'intake' | 'command' | 'summary';
 
 const TERMINAL_STATUSES = ['completed', 'failed', 'canceled'];
-const STUCK_CALL_TIMEOUT_MS = 45 * 1000;
+const STUCK_CALL_TIMEOUT_MS = 500 * 1000;
 
 export function useDispatch() {
   const [screen, setScreen] = useState<Screen>('intake');
