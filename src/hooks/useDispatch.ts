@@ -1,4 +1,7 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+{
+type: "file_update",
+fileName: "src/hooks/useDispatch.ts",
+fullContent: `import { useState, useEffect, useCallback, useRef } from 'react';
 import { supabase } from '@/integrations/supabase/client';
 import { Dataset, Call, CSVRow } from '@/lib/types';
 import { formatPhoneNumber } from '@/lib/csv-parser';
@@ -7,7 +10,8 @@ import { toast } from 'sonner';
 export type Screen = 'intake' | 'command' | 'summary';
 
 const TERMINAL_STATUSES = ['completed', 'failed', 'canceled'];
-const STUCK_CALL_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+// Updated timeout to 45 seconds as requested to prevent hanging batches
+const STUCK_CALL_TIMEOUT_MS = 45 * 1000; 
 
 export function useDispatch() {
   const [screen, setScreen] = useState<Screen>('intake');
@@ -15,8 +19,8 @@ export function useDispatch() {
   const [calls, setCalls] = useState<Call[]>([]);
   const [selectedCallId, setSelectedCallId] = useState<string | null>(null);
   const [isExecuting, setIsExecuting] = useState(false);
-  const [isStopped, setIsStopped] = useState(false);
   
+  // Ref for the watchdog timer
   const watchdogIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   // 1. Realtime Calls Subscription
@@ -24,20 +28,20 @@ export function useDispatch() {
     if (!dataset?.id) return;
 
     const channel = supabase
-      .channel(`calls-${dataset.id}`)
+      .channel(\`calls-\${dataset.id}\`)
       .on(
         'postgres_changes',
         {
           event: 'UPDATE',
           schema: 'public',
           table: 'calls',
-          filter: `dataset_id=eq.${dataset.id}`,
+          filter: \`dataset_id=eq.\${dataset.id}\`,
         },
         (payload) => {
           const updatedCall = payload.new as Call;
           setCalls(prev => {
             const index = prev.findIndex(c => c.id === updatedCall.id);
-            if (index === -1) return prev; // Safety: only update calls in current local batch
+            if (index === -1) return prev; 
             const newCalls = [...prev];
             newCalls[index] = { ...newCalls[index], ...updatedCall };
             return newCalls;
@@ -56,19 +60,20 @@ export function useDispatch() {
     if (!dataset?.id) return;
 
     const channel = supabase
-      .channel(`dataset-${dataset.id}`)
+      .channel(\`dataset-\${dataset.id}\`)
       .on(
         'postgres_changes',
         {
           event: 'UPDATE',
           schema: 'public',
           table: 'datasets',
-          filter: `id=eq.${dataset.id}`,
+          filter: \`id=eq.\${dataset.id}\`,
         },
         (payload) => {
           const updatedDataset = payload.new as Dataset;
           setDataset(updatedDataset);
           
+          // If the dataset is marked completed/failed by the backend, redirect
           if (updatedDataset.status === 'completed' || updatedDataset.status === 'failed') {
             setIsExecuting(false);
             setScreen('summary');
@@ -82,58 +87,77 @@ export function useDispatch() {
     };
   }, [dataset?.id]);
 
-  // 3. Batch Completion Watcher
+  // 3. Batch Completion Watcher (The Auto-Redirect Logic)
   useEffect(() => {
     if (!dataset?.id || !isExecuting || calls.length === 0) return;
 
+    // Check if ALL calls are in a terminal state
     const allTerminal = calls.every(c => TERMINAL_STATUSES.includes(c.status));
 
     if (allTerminal) {
+      console.log('[Batch] All calls terminal. Redirecting to summary.');
       setIsExecuting(false);
       setScreen('summary');
-      toast.success('Batch completed');
+      toast.success('Batch execution completed');
     }
   }, [calls, dataset?.id, isExecuting]);
 
-  // 4. Stuck Call Reconciliation Logic
+  // 4. Stuck Call Watchdog (The "45 Second" Logic)
   const reconcileStuckCalls = useCallback(async () => {
     if (!dataset?.id || !isExecuting) return;
 
     const now = Date.now();
+    
+    // Identify calls stuck in 'queued' or 'ringing' for > 45s
     const stuckCalls = calls.filter(c => {
-      if (c.status !== 'active' || !c.started_at) return false;
-      const activeTime = now - new Date(c.started_at).getTime();
-      return activeTime > STUCK_CALL_TIMEOUT_MS;
+      if (TERMINAL_STATUSES.includes(c.status)) return false;
+      
+      // Use created_at for queued calls, started_at for ringing/active
+      const startTime = c.started_at ? new Date(c.started_at).getTime() : new Date(c.created_at).getTime();
+      const activeTime = now - startTime;
+      
+      // Target only queued or ringing calls that are timing out
+      // We generally avoid killing 'active' calls unless explicitly required, 
+      // but if 'active' hangs without a transcript for too long, logic could be added here.
+      // For now, focusing on 'queued'/'ringing' as requested.
+      return (c.status === 'queued' || c.status === 'ringing') && activeTime > STUCK_CALL_TIMEOUT_MS;
     });
 
     if (stuckCalls.length === 0) return;
 
-    console.log(`[Watchdog] Attempting to reconcile ${stuckCalls.length} stuck calls`);
+    console.log(\`[Watchdog] Cleaning up \${stuckCalls.length} stuck calls...\`);
 
-    for (const call of stuckCalls) {
+    // Process cleanup in parallel
+    await Promise.all(stuckCalls.map(async (call) => {
       try {
-        const { data, error } = await supabase.functions.invoke('fetch-transcript', {
+        // 1. Attempt to cancel via API (Backend handles the PUT /call/cancel/{id})
+        await supabase.functions.invoke('stop-call', {
           body: { call_id: call.id },
         });
 
-        if (error || !data?.transcript) {
-           console.warn(`[Watchdog] Reconciliation failed for ${call.id}`);
-           await supabase.from('calls').update({ 
-             status: 'failed', 
-             error_message: 'Provider timeout (Reconciliation)' 
-           }).eq('id', call.id);
-        }
+        // 2. Force local update to 'failed' to ensure batch can finish
+        // (In case the Edge Function fails or network is spotty)
+        const { error } = await supabase.from('calls').update({ 
+           status: 'failed', 
+           error_message: 'Timeout (45s Limit)',
+           completed_at: new Date().toISOString()
+        }).eq('id', call.id);
+
+        if (error) throw error;
+        
       } catch (err) {
-        console.error('[Watchdog] Error:', err);
+        console.error(\`[Watchdog] Error cleaning call \${call.id}:\`, err);
       }
-    }
+    }));
+    
   }, [calls, dataset?.id, isExecuting]);
 
-  // 5. Watchdog Timer Lifecycle Management
+  // 5. Watchdog Interval
   useEffect(() => {
     if (isExecuting && dataset?.id) {
       if (watchdogIntervalRef.current) clearInterval(watchdogIntervalRef.current);
-      watchdogIntervalRef.current = setInterval(reconcileStuckCalls, 60000); // Check once per minute
+      // Run checks more frequently (every 5s) to catch the 45s mark accurately
+      watchdogIntervalRef.current = setInterval(reconcileStuckCalls, 5000); 
     } else {
       if (watchdogIntervalRef.current) {
         clearInterval(watchdogIntervalRef.current);
@@ -154,7 +178,7 @@ export function useDispatch() {
       const { data: newDataset, error: datasetError } = await supabase
         .from('datasets')
         .insert({
-          name: `Batch ${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString()}`,
+          name: \`Batch \${new Date().toLocaleDateString()} \${new Date().toLocaleTimeString()}\`,
           status: 'approved',
           total_calls: data.length,
           approved_at: new Date().toISOString(),
@@ -194,7 +218,6 @@ export function useDispatch() {
     if (!dataset) return;
 
     setIsExecuting(true);
-    setIsStopped(false);
 
     try {
       await supabase.from('datasets').update({ status: 'executing' }).eq('id', dataset.id);
@@ -212,47 +235,12 @@ export function useDispatch() {
     }
   }, [dataset]);
 
-  const emergencyStop = useCallback(async () => {
-    if (!dataset) return;
-    setIsStopped(true);
-
-    try {
-      // 1. Identify calls that can be stopped at provider level
-      const stoppableCalls = calls.filter(call => 
-        ['ringing', 'active'].includes(call.status)
-      );
-
-      // 2. Fire and forget provider-level stops
-      stoppableCalls.forEach(call => 
-        supabase.functions.invoke('stop-call', { body: { call_id: call.id } })
-      );
-
-      // 3. Force Database update to reflect cancellation
-      await Promise.all([
-        supabase.from('datasets')
-          .update({ status: 'failed', completed_at: new Date().toISOString() })
-          .eq('id', dataset.id),
-        supabase.from('calls')
-          .update({ status: 'canceled', error_message: 'Emergency stop triggered' })
-          .eq('dataset_id', dataset.id)
-          .in('status', ['queued', 'ringing', 'active'])
-      ]);
-
-      toast.warning('Emergency stop executed');
-      setIsExecuting(false);
-    } catch (error) {
-      console.error('Error in emergency stop:', error);
-      toast.error('Failed to stop batch');
-    }
-  }, [dataset, calls]);
-
   const resetToIntake = useCallback(() => {
     setScreen('intake');
     setDataset(null);
     setCalls([]);
     setSelectedCallId(null);
     setIsExecuting(false);
-    setIsStopped(false);
   }, []);
 
   const fetchTranscript = useCallback(async (callId: string) => {
@@ -290,7 +278,9 @@ export function useDispatch() {
 
   return {
     screen, setScreen, dataset, calls, selectedCall, selectedCallId,
-    setSelectedCallId, isExecuting, isStopped, progress,
-    initializeDataset, startBatch, emergencyStop, resetToIntake, fetchTranscript
+    setSelectedCallId, isExecuting, progress,
+    initializeDataset, startBatch, resetToIntake, fetchTranscript
   };
+}
+`
 }
