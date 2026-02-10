@@ -224,6 +224,20 @@ export function useDispatch() {
     setIsStopped(true);
 
     try {
+      const stoppableCalls = calls.filter(call =>
+        ['queued', 'ringing', 'active'].includes(call.status)
+      );
+
+      await Promise.all(
+        stoppableCalls
+          .filter(call => ['ringing', 'active'].includes(call.status))
+          .map(call =>
+            supabase.functions.invoke('stop-call', {
+              body: { call_id: call.id },
+            })
+          )
+      );
+
       // 1. First trigger the stop-call function for all active/ringing calls
       const stoppableCalls = calls.filter(call => 
         ['ringing', 'active'].includes(call.status)

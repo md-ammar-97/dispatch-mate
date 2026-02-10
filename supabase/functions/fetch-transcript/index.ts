@@ -137,6 +137,9 @@ serve(async (req) => {
     if (transcript) updateData.refined_transcript = transcript;
     if (recordingUrl) updateData.recording_url = recordingUrl;
     if (duration) updateData.call_duration = duration;
+    if (mappedStatus) updateData.status = mappedStatus;
+    if (mappedStatus && ["completed", "failed", "canceled"].includes(mappedStatus)) {
+      updateData.completed_at = new Date().toISOString();
     
     // Only update status if it changed and is definitive
     if (mappedStatus && mappedStatus !== call.status) {
