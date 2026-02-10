@@ -66,8 +66,8 @@ serve(async (req) => {
     if (updateError) throw updateError;
 
     return new Response(JSON.stringify({ success: true }), { headers: corsHeaders });
-  } catch (error) {
+  } catch (error: unknown) {
     console.error("[Stop Call] Fatal Error:", error);
-    return new Response(JSON.stringify({ error: error.message }), { status: 500, headers: corsHeaders });
+    return new Response(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }), { status: 500, headers: corsHeaders });
   }
 });

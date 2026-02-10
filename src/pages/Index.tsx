@@ -15,7 +15,6 @@ const Index = () => {
     progress,
     initializeDataset,
     startBatch,
-    emergencyStop,
     resetToIntake,
     fetchTranscript,
   } = useDispatch();
@@ -37,7 +36,6 @@ const Index = () => {
             isExecuting={isExecuting}
             progress={progress}
             onStartBatch={startBatch}
-            onEmergencyStop={emergencyStop}
           />
         )}
 
