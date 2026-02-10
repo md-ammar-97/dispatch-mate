@@ -238,6 +238,19 @@ export function useDispatch() {
           )
       );
 
+      // 1. First trigger the stop-call function for all active/ringing calls
+      const stoppableCalls = calls.filter(call => 
+        ['ringing', 'active'].includes(call.status)
+      );
+
+      // We don't await this blocking the UI update, but we fire them off
+      stoppableCalls.map(call => 
+        supabase.functions.invoke('stop-call', {
+          body: { call_id: call.id },
+        })
+      );
+
+      // 2. Then update DB status to reflect cancellation immediately
       await Promise.all([
         supabase.from('datasets')
           .update({ status: 'failed', completed_at: new Date().toISOString() })
@@ -254,7 +267,7 @@ export function useDispatch() {
       console.error('Error in emergency stop:', error);
       toast.error('Failed to stop batch');
     }
-  }, [dataset]);
+  }, [dataset, calls]); // Added 'calls' dependency
 
   const resetToIntake = useCallback(() => {
     setScreen('intake');

@@ -127,6 +127,8 @@ serve(async (req) => {
     const transcript = data.refinedTranscript || data.refined_transcript || data.transcript || null;
     const recordingUrl = data.recordingUrl || data.recording_url || data.call_recording_url || null;
     const duration = data.duration || data.call_duration || null;
+    
+    // Check status in case webhook failed
     const subverseStatus = data.status || data.call_status || null;
     const mappedStatus = subverseStatus ? mapSubverseStatus(subverseStatus) : null;
 
@@ -138,6 +140,13 @@ serve(async (req) => {
     if (mappedStatus) updateData.status = mappedStatus;
     if (mappedStatus && ["completed", "failed", "canceled"].includes(mappedStatus)) {
       updateData.completed_at = new Date().toISOString();
+    
+    // Only update status if it changed and is definitive
+    if (mappedStatus && mappedStatus !== call.status) {
+        updateData.status = mappedStatus;
+        if (["completed", "failed", "canceled"].includes(mappedStatus)) {
+            updateData.completed_at = new Date().toISOString();
+        }
     }
 
     if (Object.keys(updateData).length > 0) {

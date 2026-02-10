@@ -57,7 +57,7 @@ interface SubverseCallDetails {
   recordingUrl?: string;
   duration?: number;
   status?: string;
-  summary?: string; // Added summary to details interface
+  summary?: string;
 }
 
 function extractEventType(payload: SubverseWebhookPayload): string {
@@ -123,14 +123,10 @@ function extractRegNo(payload: SubverseWebhookPayload): string | null {
   return payload.metadata?.reg_no || null;
 }
 
-// NEW: Extract Analysis/Summary
+// FIX: Helper to extract AI Analysis/Summary
 function extractAnalysis(payload: SubverseWebhookPayload): string | null {
-  if (payload.data?.node?.output?.analysis) {
-    return payload.data.node.output.analysis;
-  }
-  if (payload.data?.node?.output?.summary) {
-    return payload.data.node.output.summary;
-  }
+  if (payload.data?.node?.output?.analysis) return payload.data.node.output.analysis;
+  if (payload.data?.node?.output?.summary) return payload.data.node.output.summary;
   return payload.data?.analysis || null;
 }
 
@@ -159,7 +155,7 @@ async function fetchSubverseCallDetails(subverseCallId: string): Promise<Subvers
       recordingUrl: data.recordingUrl || data.recording_url || data.call_recording_url,
       duration: data.duration || data.call_duration,
       status: data.status || data.call_status,
-      summary: data.analysis || data.summary || data.call_analysis, // Capture summary from fetch
+      summary: data.analysis || data.summary,
     };
   } catch (error) {
     console.error(`[Webhook] API Fetch error:`, error);
@@ -167,11 +163,7 @@ async function fetchSubverseCallDetails(subverseCallId: string): Promise<Subvers
   }
 }
 
-async function findCall(
-  supabase: any,
-  callId: string,
-  regNo?: string | null
-) {
+async function findCall(supabase: any, callId: string, regNo?: string | null) {
   const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   
   if (uuidRegex.test(callId)) {
@@ -236,8 +228,8 @@ serve(async (req) => {
     const payload: SubverseWebhookPayload = await req.json();
     const eventType = extractEventType(payload);
     
-    // DEBUG LOGGING: This will help you see exactly what Subverse sends
-    console.log(`[Webhook Event Received]: ${eventType}`, JSON.stringify(payload).substring(0, 500));
+    // DEBUG: Log everything so we can see what Subverse sends
+    console.log(`[Webhook Incoming] Event: ${eventType}`, JSON.stringify(payload).substring(0, 500));
 
     const callId = extractCallId(payload);
     const subverseCallId = extractSubverseCallId(payload);
@@ -306,7 +298,7 @@ serve(async (req) => {
         if (details) {
           updateData.refined_transcript = updateData.refined_transcript || details.refinedTranscript;
           updateData.recording_url = updateData.recording_url || details.recordingUrl;
-          updateData.summary = updateData.summary || details.summary; // Fallback summary
+          updateData.summary = updateData.summary || details.summary;
         }
       }
 
@@ -323,8 +315,6 @@ serve(async (req) => {
 
     return new Response(JSON.stringify({ success: true }), { headers: corsHeaders });
   } catch (error) {
-    // Better Error Logging
-    console.error(`[Webhook Error]: ${error.message}`);
     return new Response(JSON.stringify({ error: error.message }), { status: 500, headers: corsHeaders });
   }
 });
