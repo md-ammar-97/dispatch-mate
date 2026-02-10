@@ -122,7 +122,7 @@ export function useDispatch() {
 
         const { error } = await supabase.from('calls').update({ 
            status: 'failed', 
-           error_message: 'Timeout (45s Limit)',
+           error_message: 'Timeout (500s Limit)',
            completed_at: new Date().toISOString()
         }).eq('id', call.id);
 
