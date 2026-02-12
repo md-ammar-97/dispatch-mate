@@ -25,6 +25,31 @@ serve(async (req) => {
   }
 
   try {
+    // --- Authentication Check ---
+    const authHeader = req.headers.get("Authorization");
+    if (!authHeader?.startsWith("Bearer ")) {
+      return new Response(
+        JSON.stringify({ error: "Missing authorization header" }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    const authClient = createClient(
+      Deno.env.get("SUPABASE_URL")!,
+      Deno.env.get("SUPABASE_ANON_KEY")!,
+      { global: { headers: { Authorization: authHeader } } }
+    );
+
+    const token = authHeader.replace("Bearer ", "");
+    const { data: claimsData, error: claimsError } = await authClient.auth.getClaims(token);
+    if (claimsError || !claimsData?.claims) {
+      return new Response(
+        JSON.stringify({ error: "Unauthorized" }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+    // --- End Authentication Check ---
+
     const SUBVERSE_API_KEY = Deno.env.get("SUBVERSE_API_KEY");
     if (!SUBVERSE_API_KEY) {
       throw new Error("SUBVERSE_API_KEY is not configured");
@@ -71,7 +96,6 @@ serve(async (req) => {
       const call = calls[i] as CallRecord;
 
       try {
-        // Step 1: Update status to ringing BEFORE making the API call
         await supabase
           .from("calls")
           .update({ 
@@ -82,10 +106,9 @@ serve(async (req) => {
 
         console.log(`[Call ${call.id}] Status set to ringing`);
 
-        // Step 2: Trigger Subverse call
         const subversePayload = {
           phoneNumber: call.phone_number,
-          agentName: "sample_test_9", // Ensure this matches your agent ID in Subverse
+          agentName: "sample_test_9",
           metadata: {
             call_id: call.id,
             dataset_id: dataset_id,
@@ -113,15 +136,12 @@ serve(async (req) => {
         const result = await response.json();
         console.log(`[Call ${call.id}] Subverse response:`, JSON.stringify(result));
 
-        // FIX: Robust ID Extraction - Subverse puts ID in 'data' object usually
         const subverseCallId = result.data?.callId || result.data?.call_id || result.callId || result.callSid || result.call_id || null;
         
         if (!subverseCallId) {
-            console.warn(`[Call ${call.id}] Warning: Could not extract Subverse Call ID. Result was:`, JSON.stringify(result));
-            // We continue, but this call might be hard to stop later if ID is missing
+            console.warn(`[Call ${call.id}] Warning: Could not extract Subverse Call ID.`);
         }
 
-        // Step 4: Update call status to active and store the call_sid
         await supabase
           .from("calls")
           .update({
@@ -136,7 +156,6 @@ serve(async (req) => {
       } catch (error) {
         console.error(`[Call ${call.id}] Error:`, error);
 
-        // Update call as failed with error message
         await supabase
           .from("calls")
           .update({
@@ -146,7 +165,6 @@ serve(async (req) => {
           })
           .eq("id", call.id);
 
-        // Increment failed count in dataset
         await supabase.rpc("increment_dataset_counts", {
           p_dataset_id: dataset_id,
           p_successful: 0,
@@ -156,7 +174,6 @@ serve(async (req) => {
         failCount++;
       }
 
-      // Step 5: Throttle calls to avoid hitting rate limits
       if (i < calls.length - 1) {
         await new Promise((resolve) => setTimeout(resolve, CALL_DELAY_MS));
       }

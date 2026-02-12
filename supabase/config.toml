@@ -6,5 +6,8 @@ verify_jwt = false
 [functions.subverse-webhook]
 verify_jwt = false
 
-[functions.seed-admin]
+[functions.stop-call]
+verify_jwt = false
+
+[functions.fetch-transcript]
 verify_jwt = false
