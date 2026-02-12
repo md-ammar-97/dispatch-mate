@@ -73,11 +73,19 @@ serve(async (req) => {
     
     const supabase = createClient(supabaseUrl, supabaseKey);
 
-    const { call_id }: FetchTranscriptRequest = await req.json();
-    
-    if (!call_id) {
+    const bodyText = await req.text();
+    if (bodyText.length > 10000) {
       return new Response(
-        JSON.stringify({ error: "call_id is required" }),
+        JSON.stringify({ error: "Payload too large" }),
+        { status: 413, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+    const { call_id }: FetchTranscriptRequest = JSON.parse(bodyText);
+    
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!call_id || typeof call_id !== "string" || !uuidRegex.test(call_id)) {
+      return new Response(
+        JSON.stringify({ error: "call_id is required and must be a valid UUID" }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }

@@ -59,11 +59,19 @@ serve(async (req) => {
     const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
     const supabase = createClient(supabaseUrl, supabaseKey);
 
-    const { dataset_id } = await req.json();
-
-    if (!dataset_id) {
+    const body = await req.text();
+    if (body.length > 10000) {
       return new Response(
-        JSON.stringify({ error: "dataset_id is required" }),
+        JSON.stringify({ error: "Payload too large" }),
+        { status: 413, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+    const { dataset_id } = JSON.parse(body);
+
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!dataset_id || typeof dataset_id !== "string" || !uuidRegex.test(dataset_id)) {
+      return new Response(
+        JSON.stringify({ error: "dataset_id is required and must be a valid UUID" }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
