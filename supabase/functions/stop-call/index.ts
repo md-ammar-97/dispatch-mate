@@ -35,7 +35,21 @@ serve(async (req) => {
     }
     // --- End Authentication Check ---
 
-    const { call_id } = await req.json();
+    const body = await req.text();
+    if (body.length > 10000) {
+      return new Response(
+        JSON.stringify({ error: "Payload too large" }),
+        { status: 413, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+    const { call_id } = JSON.parse(body);
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!call_id || typeof call_id !== "string" || !uuidRegex.test(call_id)) {
+      return new Response(
+        JSON.stringify({ error: "call_id is required and must be a valid UUID" }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
     const SUBVERSE_API_KEY = Deno.env.get("SUBVERSE_API_KEY");
     
     const supabase = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
