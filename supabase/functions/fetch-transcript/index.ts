@@ -42,6 +42,31 @@ serve(async (req) => {
   }
 
   try {
+    // --- Authentication Check ---
+    const authHeader = req.headers.get("Authorization");
+    if (!authHeader?.startsWith("Bearer ")) {
+      return new Response(
+        JSON.stringify({ error: "Missing authorization header" }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    const authClient = createClient(
+      Deno.env.get("SUPABASE_URL")!,
+      Deno.env.get("SUPABASE_ANON_KEY")!,
+      { global: { headers: { Authorization: authHeader } } }
+    );
+
+    const token = authHeader.replace("Bearer ", "");
+    const { data: claimsData, error: claimsError } = await authClient.auth.getClaims(token);
+    if (claimsError || !claimsData?.claims) {
+      return new Response(
+        JSON.stringify({ error: "Unauthorized" }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+    // --- End Authentication Check ---
+
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
     const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
     const SUBVERSE_API_KEY = Deno.env.get("SUBVERSE_API_KEY");
@@ -57,7 +82,6 @@ serve(async (req) => {
       );
     }
 
-    // Get the call from database
     const { data: call, error: callError } = await supabase
       .from("calls")
       .select("id, call_sid, refined_transcript, recording_url, status")
@@ -71,7 +95,6 @@ serve(async (req) => {
       );
     }
 
-    // If we already have transcript, return it
     if (call.refined_transcript) {
       return new Response(
         JSON.stringify({ 
@@ -84,7 +107,6 @@ serve(async (req) => {
       );
     }
 
-    // No call_sid means we can't fetch from Subverse
     if (!call.call_sid) {
       return new Response(
         JSON.stringify({ error: "No Subverse call ID available" }),
@@ -99,7 +121,6 @@ serve(async (req) => {
       );
     }
 
-    // Fetch from Subverse API
     console.log(`[FetchTranscript] Fetching from Subverse for call_sid: ${call.call_sid}`);
     
     const response = await fetch(
@@ -128,17 +149,14 @@ serve(async (req) => {
     const recordingUrl = data.recordingUrl || data.recording_url || data.call_recording_url || null;
     const duration = data.duration || data.call_duration || null;
     
-    // Check status in case webhook failed
     const subverseStatus = data.status || data.call_status || null;
     const mappedStatus = subverseStatus ? mapSubverseStatus(subverseStatus) : null;
 
-    // Update the call in database
     const updateData: Record<string, unknown> = {};
     if (transcript) updateData.refined_transcript = transcript;
     if (recordingUrl) updateData.recording_url = recordingUrl;
     if (duration) updateData.call_duration = duration;
     
-    // Only update status if it changed and is definitive
     if (mappedStatus && mappedStatus !== call.status) {
         updateData.status = mappedStatus;
         if (["completed", "failed", "canceled"].includes(mappedStatus)) {

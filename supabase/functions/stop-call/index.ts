@@ -10,32 +10,53 @@ serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
   try {
+    // --- Authentication Check ---
+    const authHeader = req.headers.get("Authorization");
+    if (!authHeader?.startsWith("Bearer ")) {
+      return new Response(
+        JSON.stringify({ error: "Missing authorization header" }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    const authClient = createClient(
+      Deno.env.get("SUPABASE_URL")!,
+      Deno.env.get("SUPABASE_ANON_KEY")!,
+      { global: { headers: { Authorization: authHeader } } }
+    );
+
+    const token = authHeader.replace("Bearer ", "");
+    const { data: claimsData, error: claimsError } = await authClient.auth.getClaims(token);
+    if (claimsError || !claimsData?.claims) {
+      return new Response(
+        JSON.stringify({ error: "Unauthorized" }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+    // --- End Authentication Check ---
+
     const { call_id } = await req.json();
     const SUBVERSE_API_KEY = Deno.env.get("SUBVERSE_API_KEY");
     
-    // Create Supabase client
     const supabase = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
     
-    // Get call details
     const { data: call, error } = await supabase.from("calls").select("call_sid").eq("id", call_id).single();
 
     if (error || !call) {
         throw new Error("Call not found in database");
     }
 
-    // 1. Try to cancel on Subverse IF we have a call_sid (Subverse ID)
     if (call.call_sid) {
         try {
             console.log(`[Stop Call] Attempting to cancel Subverse call: ${call.call_sid}`);
             
-            // Updated to use the requested endpoint format: PUT /call/cancel/{callId}
             const response = await fetch(`https://api.subverseai.com/api/call/cancel/${call.call_sid}`, {
               method: "PUT",
               headers: {
                 "x-api-key": SUBVERSE_API_KEY!,
                 "Content-Type": "application/json",
               },
-              body: JSON.stringify({}) // Empty body as ID is now in the URL
+              body: JSON.stringify({})
             });
             
             if (!response.ok) {
@@ -48,12 +69,9 @@ serve(async (req) => {
             console.error("[Stop Call] Network Error contacting Subverse:", err);
         }
     } else {
-        // If we don't have a call_sid (e.g. call was stuck in 'queued' before trigger), we can't call the API.
-        // We just proceed to fail it locally.
         console.warn("[Stop Call] No Subverse Call ID found. Forcing local status update only.");
     }
 
-    // 2. Always force update DB status to 'failed' to ensure the batch doesn't hang
     const { error: updateError } = await supabase
         .from("calls")
         .update({ 
@@ -65,9 +83,9 @@ serve(async (req) => {
 
     if (updateError) throw updateError;
 
-    return new Response(JSON.stringify({ success: true }), { headers: corsHeaders });
+    return new Response(JSON.stringify({ success: true }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
   } catch (error: unknown) {
     console.error("[Stop Call] Fatal Error:", error);
-    return new Response(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }), { status: 500, headers: corsHeaders });
+    return new Response(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }), { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } });
   }
 });
