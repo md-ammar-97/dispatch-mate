@@ -76,7 +76,7 @@ function formatTranscript(transcriptData: unknown): string | null {
     return transcriptData
       .map((entry) => {
         const role = Object.keys(entry)[0];
-        const text = entry[role];
+        const text = (entry as any)[role];
         return `${role.charAt(0).toUpperCase() + role.slice(1)}: ${text}`;
       })
       .join("\n");
@@ -262,6 +262,22 @@ serve(async (req) => {
       );
     }
 
+    // ── Guard: ignore stale events (old Subverse callId that doesn't match current call_sid) ──
+    // This prevents late events from a previous attempt from re-queuing/overwriting current attempt state.
+    if (
+      call.call_sid &&
+      payload.data?.callId &&
+      call.call_sid !== payload.data.callId
+    ) {
+      console.log(
+        `[Webhook] Stale event ignored. DB call_sid=${call.call_sid}, payload=${payload.data.callId}`
+      );
+      return new Response(
+        JSON.stringify({ success: true, message: "Stale event ignored" }),
+        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
     // ── Idempotency: skip events for already-terminal calls ──
     if (TERMINAL_STATUSES.has(call.status)) {
       console.log(
@@ -275,6 +291,7 @@ serve(async (req) => {
 
     // NOTE: Do NOT skip events for queued calls — a completed/failed event
     // may arrive after a re-queue and must still be processed.
+    // But we DO guard duplicate retry scheduling below.
 
     // ── STATUS TRANSITIONS ──
 
@@ -283,10 +300,7 @@ serve(async (req) => {
         .from("calls")
         .update({ status: "queued" })
         .eq("id", call.id);
-    } else if (
-      eventType === "call.placed" ||
-      eventType === "call.initiated"
-    ) {
+    } else if (eventType === "call.placed" || eventType === "call.initiated") {
       await supabase
         .from("calls")
         .update({
@@ -325,6 +339,23 @@ serve(async (req) => {
       await checkDatasetCompletion(supabase, call.dataset_id);
     } else if (RETRYABLE_EVENTS.has(eventType)) {
       // ── RETRYABLE FAILURE ──
+
+      // Guard: if already queued with a future retry_at, ignore duplicate retry events.
+      // This is the main fix for webhook spam causing loops and attempt inflation.
+      if (
+        call.status === "queued" &&
+        call.retry_at &&
+        new Date(call.retry_at).getTime() > Date.now()
+      ) {
+        console.log(
+          `[Webhook] Ignoring duplicate retry event ${eventType} for call ${call.id} (already scheduled for retry at ${call.retry_at})`
+        );
+        return new Response(
+          JSON.stringify({ success: true, message: "Duplicate retry ignored" }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
       const currentAttempt = call.attempt || 1;
       const maxAttempts = call.max_attempts || 1;
       const retryMinutes = call.retry_after_minutes || 2;
@@ -401,7 +432,9 @@ serve(async (req) => {
       await checkDatasetCompletion(supabase, call.dataset_id);
     } else {
       // ── Unknown event: log but don't change status ──
-      console.log(`[Webhook] Unhandled event type: ${eventType} for call ${call.id}`);
+      console.log(
+        `[Webhook] Unhandled event type: ${eventType} for call ${call.id}`
+      );
     }
 
     return new Response(JSON.stringify({ success: true }), {
