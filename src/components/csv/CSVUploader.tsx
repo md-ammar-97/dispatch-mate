@@ -1,7 +1,7 @@
  import { useCallback, useState } from 'react';
  import { motion, AnimatePresence } from 'framer-motion';
  import { Upload, FileSpreadsheet, AlertCircle, CheckCircle } from 'lucide-react';
- import { parseCSV } from '@/lib/csv-parser';
+ import { parseCSV, parseXLSX } from '@/lib/csv-parser';
  import { CSVRow, ValidationError } from '@/lib/types';
  import { cn } from '@/lib/utils';
  
@@ -15,20 +15,30 @@
    const [fileName, setFileName] = useState<string | null>(null);
    const [parseStatus, setParseStatus] = useState<'idle' | 'success' | 'error'>('idle');
  
-   const handleFile = useCallback(async (file: File) => {
-     if (!file.name.endsWith('.csv')) {
-       onDataParsed([], [{ row: 0, field: 'file', message: 'Please upload a CSV file' }]);
-       setParseStatus('error');
-       return;
-     }
- 
-     setFileName(file.name);
-     const content = await file.text();
-     const { data, errors } = parseCSV(content);
-     
-     setParseStatus(errors.length > 0 ? 'error' : 'success');
-     onDataParsed(data, errors);
-   }, [onDataParsed]);
+  const handleFile = useCallback(async (file: File) => {
+      const isCSV = file.name.endsWith('.csv');
+      const isXLSX = file.name.endsWith('.xlsx');
+
+      if (!isCSV && !isXLSX) {
+        onDataParsed([], [{ row: 0, field: 'file', message: 'Please upload a .csv or .xlsx file' }]);
+        setParseStatus('error');
+        return;
+      }
+
+      setFileName(file.name);
+      
+      let result: { data: CSVRow[]; errors: ValidationError[] };
+      if (isXLSX) {
+        const buffer = await file.arrayBuffer();
+        result = parseXLSX(buffer);
+      } else {
+        const content = await file.text();
+        result = parseCSV(content);
+      }
+      
+      setParseStatus(result.errors.length > 0 ? 'error' : 'success');
+      onDataParsed(result.data, result.errors);
+    }, [onDataParsed]);
  
    const handleDragOver = useCallback((e: React.DragEvent) => {
      e.preventDefault();
@@ -73,9 +83,9 @@
            isProcessing && "pointer-events-none opacity-50"
          )}
        >
-         <input
-           type="file"
-           accept=".csv"
+          <input
+            type="file"
+            accept=".csv,.xlsx"
            onChange={handleInputChange}
            className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
            disabled={isProcessing}
@@ -136,11 +146,14 @@
                    or click to browse
                  </p>
                </div>
-               <div className="flex items-center gap-2 text-xs text-muted-foreground mt-2">
-                 <span className="px-2 py-1 bg-muted rounded-md font-mono">driver_name</span>
-                 <span className="px-2 py-1 bg-muted rounded-md font-mono">phone_number</span>
-                 <span className="px-2 py-1 bg-muted rounded-md font-mono">reg_no</span>
-               </div>
+                <div className="flex flex-col items-center gap-2 text-xs text-muted-foreground mt-2">
+                  <div className="flex items-center gap-2">
+                    <span className="px-2 py-1 bg-muted rounded-md font-mono">driver_name</span>
+                    <span className="px-2 py-1 bg-muted rounded-md font-mono">phone_number</span>
+                    <span className="px-2 py-1 bg-muted rounded-md font-mono">reg_no</span>
+                  </div>
+                  <span className="text-muted-foreground/60">Supports .csv and .xlsx</span>
+                </div>
              </motion.div>
            )}
          </AnimatePresence>

@@ -1,11 +1,10 @@
-import { motion } from 'framer-motion';
 import { Play, Radio, Loader2 } from 'lucide-react';
-import { Dataset, Call } from '@/lib/types';
+import { Dataset, Call, RetryConfig } from '@/lib/types';
 import { Button } from '@/components/ui/button';
 import { CallCard } from '@/components/calls/CallCard';
-import { TranscriptPanel } from '@/components/calls/TranscriptPanel';
 import { ProgressBar } from '@/components/layout/ProgressBar';
 import { PageTransition } from '@/components/layout/PageTransition';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 
 interface LiveCommandCenterProps {
   dataset: Dataset;
@@ -15,6 +14,8 @@ interface LiveCommandCenterProps {
   isExecuting: boolean;
   progress: number;
   onStartBatch: () => void;
+  retryConfig: RetryConfig;
+  onRetryConfigChange: (config: RetryConfig) => void;
 }
 
 export function LiveCommandCenter({
@@ -25,6 +26,8 @@ export function LiveCommandCenter({
   isExecuting,
   progress,
   onStartBatch,
+  retryConfig,
+  onRetryConfigChange,
 }: LiveCommandCenterProps) {
   const activeCalls = calls.filter(c => c.status === 'active').length;
   const completedCalls = calls.filter(c => c.status === 'completed' || c.status === 'failed').length;
@@ -76,10 +79,51 @@ export function LiveCommandCenter({
         </div>
       </header>
 
-      {/* Stats bar */}
+      {/* Stats bar with retry controls */}
       <div className="border-b border-border bg-muted/30">
         <div className="container mx-auto px-6 py-3">
-          <div className="flex items-center gap-6 text-sm">
+          <div className="flex items-center gap-6 text-sm flex-wrap">
+            {/* Retry controls - left aligned */}
+            <div className="flex items-center gap-3">
+              <div className="flex items-center gap-1.5">
+                <span className="text-muted-foreground text-xs whitespace-nowrap">Retry after:</span>
+                <Select
+                  value={String(retryConfig.retryAfterMinutes)}
+                  onValueChange={(v) => onRetryConfigChange({ ...retryConfig, retryAfterMinutes: Number(v) })}
+                  disabled={isExecuting}
+                >
+                  <SelectTrigger className="h-7 w-[72px] text-xs bg-background">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent className="bg-background z-50">
+                    {Array.from({ length: 14 }, (_, i) => i + 2).map(n => (
+                      <SelectItem key={n} value={String(n)}>{n} min</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <span className="text-muted-foreground text-xs whitespace-nowrap">Total attempts:</span>
+                <Select
+                  value={String(retryConfig.totalAttempts)}
+                  onValueChange={(v) => onRetryConfigChange({ ...retryConfig, totalAttempts: Number(v) })}
+                  disabled={isExecuting}
+                >
+                  <SelectTrigger className="h-7 w-[56px] text-xs bg-background">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent className="bg-background z-50">
+                    {[2, 3, 4, 5].map(n => (
+                      <SelectItem key={n} value={String(n)}>{n}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+
+            <div className="h-4 w-px bg-border" />
+
+            {/* Existing stats */}
             <div className="flex items-center gap-2">
               <span className="text-muted-foreground">Queued:</span>
               <span className="font-semibold">
@@ -109,41 +153,21 @@ export function LiveCommandCenter({
         </div>
       </div>
 
-      {/* Main content */}
+      {/* Main content - full width, no transcript panel */}
       <main className="flex-1 container mx-auto px-6 py-6">
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 h-[calc(100vh-200px)]">
-          {/* Call cards grid */}
-          <div className="lg:col-span-2 overflow-auto">
-            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
-              {calls.map((call) => (
-                <CallCard
-                  key={call.id}
-                  call={call}
-                  isActive={call.id === selectedCall?.id}
-                  onClick={() => onSelectCall(call.id)}
-                />
-              ))}
-            </div>
-          </div>
-
-          {/* Transcript panel */}
-          <div className="hidden lg:block">
-            <TranscriptPanel call={selectedCall} />
+        <div className="h-[calc(100vh-200px)] overflow-auto">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+            {calls.map((call) => (
+              <CallCard
+                key={call.id}
+                call={call}
+                isActive={call.id === selectedCall?.id}
+                onClick={() => onSelectCall(call.id)}
+              />
+            ))}
           </div>
         </div>
       </main>
-
-      {/* Mobile transcript panel */}
-      {selectedCall && (
-        <motion.div
-          initial={{ y: '100%' }}
-          animate={{ y: 0 }}
-          exit={{ y: '100%' }}
-          className="lg:hidden fixed bottom-0 left-0 right-0 h-1/2 bg-card border-t border-border z-20"
-        >
-          <TranscriptPanel call={selectedCall} />
-        </motion.div>
-      )}
     </PageTransition>
   );
 }

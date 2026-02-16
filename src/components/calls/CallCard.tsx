@@ -1,7 +1,8 @@
- import { motion } from 'framer-motion';
- import { Phone, User, Car, Loader2, CheckCircle, XCircle, PhoneCall } from 'lucide-react';
- import { Call } from '@/lib/types';
- import { cn } from '@/lib/utils';
+import { useState, useEffect } from 'react';
+import { motion } from 'framer-motion';
+import { Phone, User, Car, Loader2, CheckCircle, XCircle, PhoneCall, RotateCcw } from 'lucide-react';
+import { Call } from '@/lib/types';
+import { cn } from '@/lib/utils';
  
  interface CallCardProps {
    call: Call;
@@ -42,11 +43,38 @@
    },
  };
  
- export function CallCard({ call, isActive, onClick }: CallCardProps) {
-   const config = statusConfig[call.status];
-   const Icon = config.icon;
- 
-   return (
+export function CallCard({ call, isActive, onClick }: CallCardProps) {
+  const config = statusConfig[call.status];
+  const Icon = config.icon;
+
+  // Retry countdown timer
+  const [countdown, setCountdown] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!call.retry_at) {
+      setCountdown(null);
+      return;
+    }
+
+    const tick = () => {
+      const diff = new Date(call.retry_at!).getTime() - Date.now();
+      if (diff <= 0) {
+        setCountdown(null);
+        return;
+      }
+      const mins = Math.floor(diff / 60000);
+      const secs = Math.floor((diff % 60000) / 1000);
+      setCountdown(`${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`);
+    };
+
+    tick();
+    const interval = setInterval(tick, 1000);
+    return () => clearInterval(interval);
+  }, [call.retry_at]);
+
+  const showAttempt = call.max_attempts && call.max_attempts > 1;
+
+  return (
      <motion.div
        layout
        initial={{ opacity: 0, scale: 0.95 }}
@@ -113,18 +141,33 @@
          </motion.div>
        )}
  
-       {/* Error message */}
-       {call.error_message && (
-         <motion.div
-           initial={{ opacity: 0 }}
-           animate={{ opacity: 1 }}
-           className="mt-3 pt-3 border-t border-destructive/20"
-         >
-           <p className="text-xs text-destructive">
-             {call.error_message}
-           </p>
-         </motion.div>
-       )}
-     </motion.div>
+        {/* Attempt counter and countdown */}
+        {showAttempt && (
+          <div className="mt-3 pt-3 border-t border-border flex items-center justify-between">
+            <span className="text-xs font-medium text-muted-foreground">
+              Attempt: {call.attempt || 1}/{call.max_attempts}
+            </span>
+            {countdown && call.error_message?.includes('Could Not Connect') && (
+              <span className="flex items-center gap-1 text-xs font-mono text-warning">
+                <RotateCcw className="w-3 h-3" />
+                {countdown}
+              </span>
+            )}
+          </div>
+        )}
+
+        {/* Error message */}
+        {call.error_message && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            className="mt-3 pt-3 border-t border-destructive/20"
+          >
+            <p className="text-xs text-destructive">
+              {call.error_message}
+            </p>
+          </motion.div>
+        )}
+      </motion.div>
    );
  }

@@ -66,7 +66,7 @@ serve(async (req) => {
         { status: 413, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
-    const { dataset_id } = JSON.parse(body);
+    const { dataset_id, call_ids } = JSON.parse(body);
 
     const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     if (!dataset_id || typeof dataset_id !== "string" || !uuidRegex.test(dataset_id)) {
@@ -76,15 +76,29 @@ serve(async (req) => {
       );
     }
 
-    console.log(`[Trigger] Starting batch for dataset ${dataset_id}`);
+    // Validate optional call_ids array
+    if (call_ids && (!Array.isArray(call_ids) || !call_ids.every((id: string) => uuidRegex.test(id)))) {
+      return new Response(
+        JSON.stringify({ error: "call_ids must be an array of valid UUIDs" }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
 
-    // Fetch all queued calls for this dataset
-    const { data: calls, error: fetchError } = await supabase
+    console.log(`[Trigger] Starting batch for dataset ${dataset_id}${call_ids ? ` (${call_ids.length} specific calls)` : ''}`);
+
+    // Fetch queued calls - optionally filter by specific call_ids
+    let query = supabase
       .from("calls")
       .select("*")
       .eq("dataset_id", dataset_id)
       .eq("status", "queued")
       .order("created_at", { ascending: true });
+
+    if (call_ids && call_ids.length > 0) {
+      query = query.in("id", call_ids);
+    }
+
+    const { data: calls, error: fetchError } = await query;
 
     if (fetchError) throw fetchError;
 

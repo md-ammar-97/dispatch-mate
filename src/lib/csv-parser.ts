@@ -1,8 +1,35 @@
- import { CSVRow, ValidationError } from './types';
- 
- const REQUIRED_COLUMNS = ['driver_name', 'phone_number', 'reg_no'];
- 
- export function parseCSV(content: string): { data: CSVRow[]; errors: ValidationError[] } {
+import * as XLSX from 'xlsx';
+import { CSVRow, ValidationError } from './types';
+
+const REQUIRED_COLUMNS = ['driver_name', 'phone_number', 'reg_no'];
+
+export function parseXLSX(buffer: ArrayBuffer): { data: CSVRow[]; errors: ValidationError[] } {
+  const errors: ValidationError[] = [];
+  const data: CSVRow[] = [];
+
+  try {
+    const workbook = XLSX.read(buffer, { type: 'array' });
+    
+    if (workbook.SheetNames.length === 0) {
+      errors.push({ row: 0, field: 'file', message: 'XLSX file contains no sheets' });
+      return { data, errors };
+    }
+
+    if (workbook.SheetNames.length > 1) {
+      errors.push({ row: 0, field: 'file', message: `XLSX file has ${workbook.SheetNames.length} sheets. Only single-sheet files are supported.` });
+      return { data, errors };
+    }
+
+    const sheet = workbook.Sheets[workbook.SheetNames[0]];
+    const csvContent = XLSX.utils.sheet_to_csv(sheet);
+    return parseCSV(csvContent);
+  } catch (e) {
+    errors.push({ row: 0, field: 'file', message: `Failed to parse XLSX: ${e instanceof Error ? e.message : 'Unknown error'}` });
+    return { data, errors };
+  }
+}
+
+export function parseCSV(content: string): { data: CSVRow[]; errors: ValidationError[] } {
    const lines = content.trim().split('\n');
    const errors: ValidationError[] = [];
    const data: CSVRow[] = [];
