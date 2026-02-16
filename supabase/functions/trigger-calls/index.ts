@@ -7,26 +7,7 @@ const corsHeaders = {
     "authorization, x-client-info, apikey, content-type",
 };
 
-interface CallRecord {
-  id: string;
-  driver_name: string;
-  phone_number: string;
-  reg_no: string;
-  message: string | null;
-  status: string;
-}
-
 const SUBVERSE_API_URL = "https://api.subverseai.com/api/call/trigger";
-const CALL_DELAY_MS = 2000;
-
-// ✅ Expanded terminal statuses
-const TERMINAL_STATUSES = [
-  "completed",
-  "failed",
-  "canceled",
-  "expired",
-  "errored",
-];
 
 serve(async (req) => {
   if (req.method === "OPTIONS") {
@@ -34,7 +15,7 @@ serve(async (req) => {
   }
 
   try {
-    // --- Authentication Check ---
+    // ── Authentication ──
     const authHeader = req.headers.get("Authorization");
     if (!authHeader?.startsWith("Bearer ")) {
       return new Response(
@@ -50,26 +31,26 @@ serve(async (req) => {
     );
 
     const token = authHeader.replace("Bearer ", "");
-    const { data: claimsData, error: claimsError } =
-      await authClient.auth.getClaims(token);
-
+    const { data: claimsData, error: claimsError } = await authClient.auth.getClaims(token);
     if (claimsError || !claimsData?.claims) {
       return new Response(
         JSON.stringify({ error: "Unauthorized" }),
         { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
-    // --- End Authentication Check ---
 
+    // ── API Key ──
     const SUBVERSE_API_KEY = Deno.env.get("SUBVERSE_API_KEY");
     if (!SUBVERSE_API_KEY) {
       throw new Error("SUBVERSE_API_KEY is not configured");
     }
 
-    const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
-    const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-    const supabase = createClient(supabaseUrl, supabaseKey);
+    const supabase = createClient(
+      Deno.env.get("SUPABASE_URL")!,
+      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
+    );
 
+    // ── Input validation ──
     const body = await req.text();
     if (body.length > 10000) {
       return new Response(
@@ -78,10 +59,9 @@ serve(async (req) => {
       );
     }
 
-    const { dataset_id, call_ids } = JSON.parse(body);
+    const { dataset_id } = JSON.parse(body);
 
-    const uuidRegex = /^[0-9a-f-]{36}$/i;
-
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     if (!dataset_id || typeof dataset_id !== "string" || !uuidRegex.test(dataset_id)) {
       return new Response(
         JSON.stringify({ error: "dataset_id is required and must be a valid UUID" }),
@@ -89,191 +69,110 @@ serve(async (req) => {
       );
     }
 
-    if (
-      call_ids &&
-      (!Array.isArray(call_ids) || !call_ids.every((id: string) => uuidRegex.test(id)))
-    ) {
-      return new Response(
-        JSON.stringify({ error: "call_ids must be an array of valid UUIDs" }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+    // ── Atomic claim: concurrency guard + select-one-queued ──
+    // claim_next_queued_call checks no ringing/active calls exist,
+    // then claims the oldest eligible queued call (respecting retry_at).
+    const { data: claimed, error: claimErr } = await supabase
+      .rpc("claim_next_queued_call", { p_dataset_id: dataset_id });
+
+    if (claimErr) {
+      console.error("[Trigger] claim_next_queued_call error:", claimErr);
+      throw claimErr;
     }
 
-    console.log(
-      `[Trigger] Starting batch for dataset ${dataset_id}${
-        call_ids ? ` (${call_ids.length} specific calls)` : ""
-      }`
-    );
-
-    // Fetch queued calls
-    let query = supabase
-      .from("calls")
-      .select("*")
-      .eq("dataset_id", dataset_id)
-      .eq("status", "queued")
-      .order("created_at", { ascending: true });
-
-    if (call_ids && call_ids.length > 0) {
-      query = query.in("id", call_ids);
-    }
-
-    const { data: calls, error: fetchError } = await query;
-    if (fetchError) throw fetchError;
-
-    // ✅ If no queued calls, check if dataset should close
-    if (!calls || calls.length === 0) {
-      const { data: remaining } = await supabase
-        .from("calls")
-        .select("id")
-        .eq("dataset_id", dataset_id)
-        .not("status", "in", `('${TERMINAL_STATUSES.join("','")}')`);
-
-      if (!remaining || remaining.length === 0) {
-        await supabase
-          .from("datasets")
-          .update({
-            status: "completed",
-            completed_at: new Date().toISOString(),
-          })
-          .eq("id", dataset_id);
-
-        console.log(`[Trigger] Dataset ${dataset_id} marked completed`);
-      }
-
+    if (!claimed || claimed.length === 0) {
       return new Response(
-        JSON.stringify({ message: "No queued calls found" }),
+        JSON.stringify({ message: "No dispatchable calls (queue empty or call in progress)" }),
         { headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
-    console.log(`[Trigger] Found ${calls.length} queued calls`);
+    const call = claimed[0];
+    console.log(`[Trigger] Dispatching call ${call.id} (attempt ${call.attempt}/${call.max_attempts})`);
 
-    let successCount = 0;
-    let failCount = 0;
+    // ── Place Subverse API call ──
+    try {
+      const subversePayload = {
+        phoneNumber: call.phone_number,
+        agentName: "sample_test_9",
+        metadata: {
+          call_id: call.id,
+          dataset_id: dataset_id,
+          reg_no: call.reg_no,
+          driver_name: call.driver_name,
+          driver_phone: call.phone_number,
+          message: call.message || `Hello ${call.driver_name}, your vehicle ${call.reg_no} is ready for dispatch.`,
+        },
+      };
 
-    for (let i = 0; i < calls.length; i++) {
-      const call = calls[i] as CallRecord;
+      const response = await fetch(SUBVERSE_API_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": SUBVERSE_API_KEY,
+        },
+        body: JSON.stringify(subversePayload),
+      });
 
-      try {
-        await supabase
-          .from("calls")
-          .update({
-            status: "ringing",
-            started_at: new Date().toISOString(),
-          })
-          .eq("id", call.id);
-
-        console.log(`[Call ${call.id}] Status set to ringing`);
-
-        const subversePayload = {
-          phoneNumber: call.phone_number,
-          agentName: "sample_test_9",
-          metadata: {
-            call_id: call.id,
-            dataset_id: dataset_id,
-            driver_name: call.driver_name,
-            driver_phone: call.phone_number,
-            reg_no: call.reg_no,
-            message:
-              call.message ||
-              `Hello ${call.driver_name}, your vehicle ${call.reg_no} is ready for dispatch.`,
-          },
-        };
-
-        const response = await fetch(SUBVERSE_API_URL, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-api-key": SUBVERSE_API_KEY,
-          },
-          body: JSON.stringify(subversePayload),
-        });
-
-        if (!response.ok) {
-          const errorText = await response.text();
-          throw new Error(`Subverse API error: ${response.status} - ${errorText}`);
-        }
-
-        const result = await response.json();
-
-        const subverseCallId =
-          result.data?.callId ||
-          result.data?.call_id ||
-          result.callId ||
-          result.callSid ||
-          result.call_id ||
-          null;
-
-        await supabase
-          .from("calls")
-          .update({
-            status: "active",
-            call_sid: subverseCallId,
-          })
-          .eq("id", call.id);
-
-        successCount++;
-      } catch (error) {
-        console.error(`[Call ${call.id}] Error:`, error);
-
-        await supabase
-          .from("calls")
-          .update({
-            status: "failed",
-            error_message:
-              error instanceof Error ? error.message : "Unknown error",
-            completed_at: new Date().toISOString(),
-          })
-          .eq("id", call.id);
-
-        await supabase.rpc("increment_dataset_counts", {
-          p_dataset_id: dataset_id,
-          p_successful: 0,
-          p_failed: 1,
-        });
-
-        failCount++;
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Subverse API error: ${response.status} - ${errorText}`);
       }
 
-      if (i < calls.length - 1) {
-        await new Promise((resolve) => setTimeout(resolve, CALL_DELAY_MS));
+      const result = await response.json();
+      const callSid =
+        result.data?.callId ||
+        result.data?.call_id ||
+        result.callId ||
+        result.callSid ||
+        null;
+
+      if (!callSid) {
+        console.warn(`[Trigger] Warning: Could not extract Subverse Call ID for ${call.id}`);
       }
-    }
 
-    // ✅ After loop, check if dataset should close
-    const { data: remainingAfter } = await supabase
-      .from("calls")
-      .select("id")
-      .eq("dataset_id", dataset_id)
-      .not("status", "in", `('${TERMINAL_STATUSES.join("','")}')`);
-
-    if (!remainingAfter || remainingAfter.length === 0) {
       await supabase
-        .from("datasets")
+        .from("calls")
+        .update({ status: "active", call_sid: callSid })
+        .eq("id", call.id);
+
+      console.log(`[Trigger] Call ${call.id} active, call_sid: ${callSid}`);
+
+      return new Response(
+        JSON.stringify({ success: true, call_id: call.id, call_sid: callSid }),
+        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    } catch (err) {
+      // ── Dispatch failure: mark call as failed ──
+      console.error(`[Trigger] Subverse dispatch failed for ${call.id}:`, err);
+
+      await supabase
+        .from("calls")
         .update({
-          status: "completed",
+          status: "failed",
+          error_message: err instanceof Error ? err.message : "Dispatch failed",
           completed_at: new Date().toISOString(),
         })
-        .eq("id", dataset_id);
+        .eq("id", call.id);
 
-      console.log(`[Trigger] Dataset ${dataset_id} auto-completed`);
+      await supabase.rpc("increment_dataset_counts", {
+        p_dataset_id: dataset_id,
+        p_successful: 0,
+        p_failed: 1,
+      });
+
+      return new Response(
+        JSON.stringify({
+          success: false,
+          error: err instanceof Error ? err.message : "Dispatch failed",
+        }),
+        { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
     }
-
-    return new Response(
-      JSON.stringify({
-        success: true,
-        message: `Processing ${calls.length} calls`,
-        initiated: successCount,
-        failed: failCount,
-      }),
-      { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-    );
   } catch (error) {
     console.error("[Trigger] Fatal error:", error);
     return new Response(
-      JSON.stringify({
-        error: error instanceof Error ? error.message : "Unknown error",
-      }),
+      JSON.stringify({ error: error instanceof Error ? error.message : "Unknown error" }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   }

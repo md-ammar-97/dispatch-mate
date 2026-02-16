@@ -1,16 +1,16 @@
- // Database types
- export interface Dataset {
-   id: string;
-   name: string;
-   status: 'pending' | 'approved' | 'executing' | 'completed' | 'failed';
-   total_calls: number;
-   successful_calls: number;
-   failed_calls: number;
-   created_at: string;
-   approved_at: string | null;
-   completed_at: string | null;
- }
- 
+// Database types
+export interface Dataset {
+  id: string;
+  name: string;
+  status: 'pending' | 'approved' | 'executing' | 'completed' | 'failed';
+  total_calls: number;
+  successful_calls: number;
+  failed_calls: number;
+  created_at: string;
+  approved_at: string | null;
+  completed_at: string | null;
+}
+
 export interface Call {
   id: string;
   dataset_id: string;
@@ -18,7 +18,7 @@ export interface Call {
   phone_number: string;
   reg_no: string;
   message: string | null;
-  status: 'queued' | 'ringing' | 'active' | 'completed' | 'failed' | 'canceled';
+  status: 'queued' | 'ringing' | 'active' | 'completed' | 'failed' | 'canceled' | 'errored' | 'expired';
   live_transcript: string;
   refined_transcript: string | null;
   recording_url: string | null;
@@ -29,10 +29,11 @@ export interface Call {
   started_at: string | null;
   completed_at: string | null;
   client_timestamp: string | null;
-  // Retry fields (client-side only)
-  attempt?: number;
-  max_attempts?: number;
-  retry_at?: string | null;
+  // Retry fields (DB columns)
+  attempt: number;
+  max_attempts: number;
+  retry_after_minutes: number;
+  retry_at: string | null;
 }
 
 export interface RetryConfig {
@@ -46,9 +47,9 @@ export interface CSVRow {
   reg_no: string;
   message?: string;
 }
- 
- export interface ValidationError {
-   row: number;
-   field: string;
-   message: string;
- }
+
+export interface ValidationError {
+  row: number;
+  field: string;
+  message: string;
+}

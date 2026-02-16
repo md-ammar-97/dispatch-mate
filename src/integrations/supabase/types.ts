@@ -17,6 +17,7 @@ export type Database = {
       calls: {
         Row: {
           analysis_data: Json | null
+          attempt: number
           call_duration: number | null
           call_sid: string | null
           client_timestamp: string | null
@@ -27,17 +28,21 @@ export type Database = {
           error_message: string | null
           id: string
           live_transcript: string | null
+          max_attempts: number
           message: string | null
           phone_number: string
           recording_url: string | null
           refined_transcript: string | null
           reg_no: string
+          retry_after_minutes: number
+          retry_at: string | null
           started_at: string | null
           status: string
           summary: string | null
         }
         Insert: {
           analysis_data?: Json | null
+          attempt?: number
           call_duration?: number | null
           call_sid?: string | null
           client_timestamp?: string | null
@@ -48,17 +53,21 @@ export type Database = {
           error_message?: string | null
           id?: string
           live_transcript?: string | null
+          max_attempts?: number
           message?: string | null
           phone_number: string
           recording_url?: string | null
           refined_transcript?: string | null
           reg_no: string
+          retry_after_minutes?: number
+          retry_at?: string | null
           started_at?: string | null
           status?: string
           summary?: string | null
         }
         Update: {
           analysis_data?: Json | null
+          attempt?: number
           call_duration?: number | null
           call_sid?: string | null
           client_timestamp?: string | null
@@ -69,11 +78,14 @@ export type Database = {
           error_message?: string | null
           id?: string
           live_transcript?: string | null
+          max_attempts?: number
           message?: string | null
           phone_number?: string
           recording_url?: string | null
           refined_transcript?: string | null
           reg_no?: string
+          retry_after_minutes?: number
+          retry_at?: string | null
           started_at?: string | null
           status?: string
           summary?: string | null
@@ -129,6 +141,40 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      claim_next_queued_call: {
+        Args: { p_dataset_id: string }
+        Returns: {
+          analysis_data: Json | null
+          attempt: number
+          call_duration: number | null
+          call_sid: string | null
+          client_timestamp: string | null
+          completed_at: string | null
+          created_at: string
+          dataset_id: string
+          driver_name: string
+          error_message: string | null
+          id: string
+          live_transcript: string | null
+          max_attempts: number
+          message: string | null
+          phone_number: string
+          recording_url: string | null
+          refined_transcript: string | null
+          reg_no: string
+          retry_after_minutes: number
+          retry_at: string | null
+          started_at: string | null
+          status: string
+          summary: string | null
+        }[]
+        SetofOptions: {
+          from: "*"
+          to: "calls"
+          isOneToOne: false
+          isSetofReturn: true
+        }
+      }
       increment_dataset_counts: {
         Args: { p_dataset_id: string; p_failed?: number; p_successful?: number }
         Returns: undefined
