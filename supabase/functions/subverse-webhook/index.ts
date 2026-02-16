@@ -273,16 +273,8 @@ serve(async (req) => {
       );
     }
 
-    // ── Skip late events for re-queued calls (from previous attempts) ──
-    if (call.status === "queued") {
-      console.log(
-        `[Webhook] Call ${call.id} is queued (possibly re-queued). Skipping late event ${eventType}.`
-      );
-      return new Response(
-        JSON.stringify({ success: true, message: "Call is queued, skipping" }),
-        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
+    // NOTE: Do NOT skip events for queued calls — a completed/failed event
+    // may arrive after a re-queue and must still be processed.
 
     // ── STATUS TRANSITIONS ──
 
@@ -361,10 +353,8 @@ serve(async (req) => {
           })
           .eq("id", call.id);
 
-        // Don't dispatch next — this call is still pending (delayed by retry_at).
-        // The frontend poll will pick it up after retry_at.
-        // But DO try to dispatch a different call if available:
-        await dispatchNextCall(supabase, call.dataset_id);
+        // Do NOT dispatch next here — this call is re-queued with a retry_at delay.
+        // claim_next_queued_call will pick it up only after retry_at has passed.
       } else {
         // ── PERMANENT FAILURE (max attempts exhausted) ──
         console.log(
