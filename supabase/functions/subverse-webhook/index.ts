@@ -6,7 +6,6 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
-// Updated payload structure based on observed API behavior
 interface SubverseWebhookPayload {
   eventType?: string;
   event?: string;
@@ -15,14 +14,13 @@ interface SubverseWebhookPayload {
     callId?: string;
     customerNumber?: string;
     duration?: number;
-    recordingURL?: string; // Observed camelCase from API
+    recordingURL?: string;
     analysis?: {
       summary?: string;
       user_sentiment?: string;
       task_completion?: boolean;
     };
-    transcript?: Array<Record<string, string>>; // Observed array of objects
-    // Workflow structure support
+    transcript?: Array<Record<string, string>>;
     node?: {
       output?: {
         call_id?: string;
@@ -40,13 +38,10 @@ interface SubverseWebhookPayload {
   };
 }
 
-/**
- * Helper to turn Subverse transcript array into readable string
- */
 function formatTranscript(transcriptData: any): string | null {
   if (!transcriptData) return null;
   if (typeof transcriptData === "string") return transcriptData;
-  
+
   if (Array.isArray(transcriptData)) {
     return transcriptData
       .map((entry) => {
@@ -65,9 +60,9 @@ function extractEventType(payload: SubverseWebhookPayload): string {
 
 function extractCallId(payload: SubverseWebhookPayload): string | null {
   return (
-    payload.data?.callId || 
-    payload.data?.node?.output?.call_id || 
-    payload.metadata?.call_id || 
+    payload.data?.callId ||
+    payload.data?.node?.output?.call_id ||
+    payload.metadata?.call_id ||
     null
   );
 }
@@ -78,16 +73,14 @@ function extractAnalysis(payload: SubverseWebhookPayload): string | null {
   return null;
 }
 
-async function findCall(supabase: any, callId: string, regNo?: string | null) {
-  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-  
-  // 1. Try internal UUID
+async function findCall(supabase: any, callId: string) {
+  const uuidRegex = /^[0-9a-f-]{36}$/i;
+
   if (uuidRegex.test(callId)) {
     const { data } = await supabase.from("calls").select("*").eq("id", callId).single();
     if (data) return data;
   }
-  
-  // 2. Try call_sid (Subverse callId)
+
   const { data: bySid } = await supabase.from("calls").select("*").eq("call_sid", callId).single();
   if (bySid) return bySid;
 
@@ -119,23 +112,22 @@ serve(async (req) => {
       return new Response(JSON.stringify({ success: true, message: "Call not found" }), { headers: corsHeaders });
     }
 
-    // ========== 1. STATUS EVOLUTION ==========
+    // ================= STATUS EVOLUTION =================
     if (eventType === "call.in_queue") {
       await supabase.from("calls").update({ status: "queued" }).eq("id", call.id);
     } 
     
     else if (eventType === "call.placed" || eventType === "call.initiated") {
-      await supabase.from("calls").update({ 
-        status: "active", 
-        started_at: call.started_at || new Date().toISOString() 
+      await supabase.from("calls").update({
+        status: "active",
+        started_at: call.started_at || new Date().toISOString(),
       }).eq("id", call.id);
     }
 
-    // ========== 2. TERMINAL COMPLETION ==========
+    // ================= SUCCESS =================
     else if (eventType === "call.completed") {
       const transcriptStr = formatTranscript(payload.data?.transcript || payload.data?.node?.output?.transcript);
       const recordingUrl = payload.data?.recordingURL || payload.data?.node?.output?.call_recording_url;
-      const summary = extractAnalysis(payload);
 
       await supabase.from("calls").update({
         status: "completed",
@@ -143,55 +135,68 @@ serve(async (req) => {
         refined_transcript: transcriptStr || call.refined_transcript,
         recording_url: recordingUrl || call.recording_url,
         call_duration: payload.data?.duration || call.call_duration
-        // If your schema has a 'summary' column, add it here:
-        // summary: summary 
       }).eq("id", call.id);
 
-      // Update Dataset Progress
-      await supabase.rpc("increment_dataset_counts", { 
-        p_dataset_id: call.dataset_id, 
-        p_successful: 1, 
-        p_failed: 0 
+      await supabase.rpc("increment_dataset_counts", {
+        p_dataset_id: call.dataset_id,
+        p_successful: 1,
+        p_failed: 0,
       });
-      
-      // Auto-close dataset if all calls terminal
-      const { data: remaining } = await supabase
-        .from("calls")
-        .select("id")
-        .eq("dataset_id", call.dataset_id)
-        .not("status", "in", "('completed','failed','canceled')");
-
-      if (!remaining || remaining.length === 0) {
-        await supabase.from("datasets")
-          .update({ status: "completed", completed_at: new Date().toISOString() })
-          .eq("id", call.dataset_id);
-      }
     }
 
-    // ========== 3. FAILURE HANDLING ==========
-    else if (["call.failed", "call.no_answer", "call.busy"].includes(eventType)) {
+    // ================= FAILURE (EXPANDED LIST) =================
+    else if (
+      [
+        "call.failed",
+        "call.no_answer",
+        "call.busy",
+        "call.rejected",
+        "call.declined",
+        "call.expired",
+        "call.timeout",
+        "call.errored",
+        "call.could_not_connect",
+        "call.disconnected",
+        "call.hangup",
+        "call.dropped"
+      ].includes(eventType)
+    ) {
       await supabase.from("calls").update({
         status: "failed",
         completed_at: new Date().toISOString(),
         error_message: `Provider event: ${eventType}`
       }).eq("id", call.id);
 
-      await supabase.rpc("increment_dataset_counts", { 
-        p_dataset_id: call.dataset_id, 
-        p_successful: 0, 
-        p_failed: 1 
+      await supabase.rpc("increment_dataset_counts", {
+        p_dataset_id: call.dataset_id,
+        p_successful: 0,
+        p_failed: 1,
       });
     }
 
-    return new Response(JSON.stringify({ success: true }), { 
-      headers: { ...corsHeaders, "Content-Type": "application/json" } 
+    // ================= DATASET AUTO CLOSE (FIXED) =================
+    const { data: remaining } = await supabase
+      .from("calls")
+      .select("id")
+      .eq("dataset_id", call.dataset_id)
+      .not("status", "in", "('completed','failed','canceled','expired','errored')");
+
+    if (!remaining || remaining.length === 0) {
+      await supabase
+        .from("datasets")
+        .update({ status: "completed", completed_at: new Date().toISOString() })
+        .eq("id", call.dataset_id);
+    }
+
+    return new Response(JSON.stringify({ success: true }), {
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
 
   } catch (error: unknown) {
     console.error("[Webhook Error]", error instanceof Error ? error.message : error);
-    return new Response(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }), { 
-      status: 500, 
-      headers: { ...corsHeaders, "Content-Type": "application/json" } 
-    });
+    return new Response(
+      JSON.stringify({ error: error instanceof Error ? error.message : String(error) }),
+      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+    );
   }
 });
