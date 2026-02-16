@@ -284,7 +284,14 @@ serve(async (req) => {
     // ── STATUS TRANSITIONS ──
 
     if (eventType === "call.in_queue") {
-      await supabase.from("calls").update({ status: "queued" }).eq("id", call.id);
+  await supabase
+    .from("calls")
+    .update({
+      status: "ringing",                 // treat provider queue as "in progress"
+      started_at: call.started_at || new Date().toISOString(),
+      // IMPORTANT: do NOT clear call_sid here
+    })
+    .eq("id", call.id);
     } else if (eventType === "call.placed" || eventType === "call.initiated") {
       await supabase
         .from("calls")
