@@ -20,7 +20,10 @@ serve(async (req) => {
     if (!authHeader?.startsWith("Bearer ")) {
       return new Response(
         JSON.stringify({ error: "Missing authorization header" }),
-        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        {
+          status: 401,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        }
       );
     }
 
@@ -31,12 +34,14 @@ serve(async (req) => {
     );
 
     const token = authHeader.replace("Bearer ", "");
-    const { data: claimsData, error: claimsError } = await authClient.auth.getClaims(token);
+    const { data: claimsData, error: claimsError } =
+      await authClient.auth.getClaims(token);
+
     if (claimsError || !claimsData?.claims) {
-      return new Response(
-        JSON.stringify({ error: "Unauthorized" }),
-        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+      return new Response(JSON.stringify({ error: "Unauthorized" }), {
+        status: 401,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
     }
 
     // ── API Key ──
@@ -51,17 +56,18 @@ serve(async (req) => {
     );
 
     // ── Input validation ──
-    const body = await req.text();
-    if (body.length > 10000) {
-      return new Response(
-        JSON.stringify({ error: "Payload too large" }),
-        { status: 413, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+    const bodyText = await req.text();
+    if (bodyText.length > 10000) {
+      return new Response(JSON.stringify({ error: "Payload too large" }), {
+        status: 413,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
     }
 
-    const { dataset_id } = JSON.parse(body);
+    const { dataset_id } = JSON.parse(bodyText);
 
-    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const uuidRegex =
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     if (!dataset_id || typeof dataset_id !== "string" || !uuidRegex.test(dataset_id)) {
       return new Response(
         JSON.stringify({ error: "dataset_id is required and must be a valid UUID" }),
@@ -69,11 +75,11 @@ serve(async (req) => {
       );
     }
 
-    // ── Atomic claim: concurrency guard + select-one-queued ──
-    // claim_next_queued_call checks no ringing/active calls exist,
-    // then claims the oldest eligible queued call (respecting retry_at).
-    const { data: claimed, error: claimErr } = await supabase
-      .rpc("claim_next_queued_call", { p_dataset_id: dataset_id });
+    // ── Atomic claim (now serialized by pg_advisory_xact_lock inside SQL fn) ──
+    const { data: claimed, error: claimErr } = await supabase.rpc(
+      "claim_next_queued_call",
+      { p_dataset_id: dataset_id }
+    );
 
     if (claimErr) {
       console.error("[Trigger] claim_next_queued_call error:", claimErr);
@@ -82,26 +88,37 @@ serve(async (req) => {
 
     if (!claimed || claimed.length === 0) {
       return new Response(
-        JSON.stringify({ message: "No dispatchable calls (queue empty or call in progress)" }),
+        JSON.stringify({
+          message: "No dispatchable calls (queue empty, retry_at not reached, or call in progress)",
+        }),
         { headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
     const call = claimed[0];
-    console.log(`[Trigger] Dispatching call ${call.id} (attempt ${call.attempt}/${call.max_attempts})`);
+    console.log(
+      `[Trigger] Dispatching call ${call.id} (attempt ${call.attempt}/${call.max_attempts})`
+    );
 
-    // ── Place Subverse API call ──
+    // ── Place Subverse call ──
     try {
       const subversePayload = {
         phoneNumber: call.phone_number,
         agentName: "sample_test_9",
         metadata: {
+          // ✅ Always include our UUID for webhook correlation
           call_id: call.id,
-          dataset_id: dataset_id,
+          dataset_id,
           reg_no: call.reg_no,
           driver_name: call.driver_name,
           driver_phone: call.phone_number,
-          message: call.message || `Hello ${call.driver_name}, your vehicle ${call.reg_no} is ready for dispatch.`,
+
+          // ✅ Add attempt for debugging + safer correlation later
+          attempt: call.attempt,
+
+          message:
+            call.message ||
+            `Hello ${call.driver_name}, your vehicle ${call.reg_no} is ready for dispatch.`,
         },
       };
 
@@ -127,10 +144,6 @@ serve(async (req) => {
         result.callSid ||
         null;
 
-      if (!callSid) {
-        console.warn(`[Trigger] Warning: Could not extract Subverse Call ID for ${call.id}`);
-      }
-
       await supabase
         .from("calls")
         .update({ status: "active", call_sid: callSid })
@@ -143,7 +156,6 @@ serve(async (req) => {
         { headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     } catch (err) {
-      // ── Dispatch failure: mark call as failed ──
       console.error(`[Trigger] Subverse dispatch failed for ${call.id}:`, err);
 
       await supabase
