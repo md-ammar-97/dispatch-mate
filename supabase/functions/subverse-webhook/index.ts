@@ -7,7 +7,7 @@ const corsHeaders = {
     "authorization, x-client-info, apikey, content-type",
 };
 
-// ── Comprehensive terminal statuses ──
+// ── Terminal statuses ──
 const TERMINAL_STATUSES = new Set([
   "completed",
   "failed",
@@ -16,7 +16,12 @@ const TERMINAL_STATUSES = new Set([
   "errored",
 ]);
 
-// ── Retryable event types (explicit mapping, no string matching) ──
+/**
+ * IMPORTANT:
+ * Do NOT treat "call.disconnected"/"call.hangup"/"call.dropped" as retryable.
+ * Those often happen in normal call flows (answered calls, normal ends),
+ * and will cause false retries + loops.
+ */
 const RETRYABLE_EVENTS = new Set([
   "call.failed",
   "call.no_answer",
@@ -27,9 +32,6 @@ const RETRYABLE_EVENTS = new Set([
   "call.timeout",
   "call.errored",
   "call.could_not_connect",
-  "call.disconnected",
-  "call.hangup",
-  "call.dropped",
 ]);
 
 const SUBVERSE_API_URL = "https://api.subverseai.com/api/call/trigger";
@@ -40,7 +42,7 @@ interface SubverseWebhookPayload {
   event?: string;
   createdAt?: string;
   data?: {
-    callId?: string;
+    callId?: string; // provider call id
     customerNumber?: string;
     duration?: number;
     recordingURL?: string;
@@ -52,7 +54,7 @@ interface SubverseWebhookPayload {
     transcript?: Array<Record<string, string>>;
     node?: {
       output?: {
-        call_id?: string;
+        call_id?: string; // sometimes present
         call_status?: string;
         transcript?: unknown;
         call_recording_url?: string;
@@ -61,14 +63,14 @@ interface SubverseWebhookPayload {
     };
   };
   metadata?: {
-    call_id?: string;
+    call_id?: string;     // OUR UUID (most reliable)
     dataset_id?: string;
     reg_no?: string;
+    attempt?: number;     // we send this from trigger-calls now
   };
 }
 
 // ── Helpers ──
-
 function formatTranscript(transcriptData: unknown): string | null {
   if (!transcriptData) return null;
   if (typeof transcriptData === "string") return transcriptData;
@@ -88,11 +90,17 @@ function extractEventType(payload: SubverseWebhookPayload): string {
   return (payload.eventType || payload.event || "").toLowerCase();
 }
 
+/**
+ * ✅ CRITICAL FIX:
+ * Always prefer OUR UUID from metadata.call_id.
+ * Provider callId may arrive before we stored call_sid, causing "call not found"
+ * and broken state transitions.
+ */
 function extractCallId(payload: SubverseWebhookPayload): string | null {
   return (
-    payload.data?.callId ||
-    payload.data?.node?.output?.call_id ||
     payload.metadata?.call_id ||
+    payload.data?.node?.output?.call_id ||
+    payload.data?.callId ||
     null
   );
 }
@@ -101,6 +109,7 @@ function extractCallId(payload: SubverseWebhookPayload): string | null {
 async function findCall(supabase: any, callId: string) {
   const uuidRegex = /^[0-9a-f-]{36}$/i;
 
+  // If it’s our UUID, fetch directly
   if (uuidRegex.test(callId)) {
     const { data } = await supabase
       .from("calls")
@@ -110,16 +119,17 @@ async function findCall(supabase: any, callId: string) {
     if (data) return data;
   }
 
+  // Otherwise treat it as provider call_sid
   const { data: bySid } = await supabase
     .from("calls")
     .select("*")
     .eq("call_sid", callId)
     .maybeSingle();
+
   return bySid || null;
 }
 
-// ── Dispatch next queued call for a dataset (non-recursive) ──
-// Called after a call reaches a terminal state to advance the queue.
+// ── Dispatch next queued call for a dataset ──
 // deno-lint-ignore no-explicit-any
 async function dispatchNextCall(supabase: any, datasetId: string) {
   const SUBVERSE_API_KEY = Deno.env.get("SUBVERSE_API_KEY");
@@ -162,6 +172,7 @@ async function dispatchNextCall(supabase: any, datasetId: string) {
           call_id: call.id,
           dataset_id: datasetId,
           reg_no: call.reg_no,
+          attempt: call.attempt, // ✅ keep consistent
           driver_name: call.driver_name,
           driver_phone: call.phone_number,
           message:
@@ -178,7 +189,7 @@ async function dispatchNextCall(supabase: any, datasetId: string) {
 
     const result = await response.json();
     const callSid =
-      result.data?.callId || result.data?.call_id || result.callId || null;
+      result.data?.callId || result.data?.call_id || result.callId || result.callSid || null;
 
     await supabase
       .from("calls")
@@ -204,11 +215,11 @@ async function dispatchNextCall(supabase: any, datasetId: string) {
       p_failed: 1,
     });
 
-    // Do NOT recurse here — let the next poll or webhook handle it
+    // Do NOT recurse
   }
 }
 
-// ── Check if all calls in dataset are terminal → auto-close dataset ──
+// ── Check if all calls are terminal ──
 // deno-lint-ignore no-explicit-any
 async function checkDatasetCompletion(supabase: any, datasetId: string) {
   const terminalList = [...TERMINAL_STATUSES].map((s) => `'${s}'`).join(",");
@@ -247,59 +258,33 @@ serve(async (req) => {
     console.log(`[Webhook] Received ${eventType} for call ${callId}`);
 
     if (!callId) {
-      return new Response(
-        JSON.stringify({ success: true, message: "No callId" }),
-        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+      return new Response(JSON.stringify({ success: true, message: "No callId" }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
     }
 
     const call = await findCall(supabase, callId);
     if (!call) {
       console.error(`[Webhook] Call not found in DB: ${callId}`);
-      return new Response(
-        JSON.stringify({ success: true, message: "Call not found" }),
-        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+      return new Response(JSON.stringify({ success: true, message: "Call not found" }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
     }
 
-    // ── Guard: ignore stale events (old Subverse callId that doesn't match current call_sid) ──
-    // This prevents late events from a previous attempt from re-queuing/overwriting current attempt state.
-    if (
-      call.call_sid &&
-      payload.data?.callId &&
-      call.call_sid !== payload.data.callId
-    ) {
-      console.log(
-        `[Webhook] Stale event ignored. DB call_sid=${call.call_sid}, payload=${payload.data.callId}`
-      );
-      return new Response(
-        JSON.stringify({ success: true, message: "Stale event ignored" }),
-        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
-
-    // ── Idempotency: skip events for already-terminal calls ──
+    // ── Idempotency: skip events for terminal calls ──
     if (TERMINAL_STATUSES.has(call.status)) {
       console.log(
         `[Webhook] Call ${call.id} already terminal (${call.status}). Skipping ${eventType}.`
       );
-      return new Response(
-        JSON.stringify({ success: true, message: "Already terminal" }),
-        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+      return new Response(JSON.stringify({ success: true, message: "Already terminal" }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
     }
-
-    // NOTE: Do NOT skip events for queued calls — a completed/failed event
-    // may arrive after a re-queue and must still be processed.
-    // But we DO guard duplicate retry scheduling below.
 
     // ── STATUS TRANSITIONS ──
 
     if (eventType === "call.in_queue") {
-      await supabase
-        .from("calls")
-        .update({ status: "queued" })
-        .eq("id", call.id);
+      await supabase.from("calls").update({ status: "queued" }).eq("id", call.id);
     } else if (eventType === "call.placed" || eventType === "call.initiated") {
       await supabase
         .from("calls")
@@ -314,8 +299,7 @@ serve(async (req) => {
         payload.data?.transcript || payload.data?.node?.output?.transcript
       );
       const recordingUrl =
-        payload.data?.recordingURL ||
-        payload.data?.node?.output?.call_recording_url;
+        payload.data?.recordingURL || payload.data?.node?.output?.call_recording_url;
 
       await supabase
         .from("calls")
@@ -334,37 +318,16 @@ serve(async (req) => {
         p_failed: 0,
       });
 
-      // Advance queue + check completion
       await dispatchNextCall(supabase, call.dataset_id);
       await checkDatasetCompletion(supabase, call.dataset_id);
     } else if (RETRYABLE_EVENTS.has(eventType)) {
       // ── RETRYABLE FAILURE ──
-
-      // Guard: if already queued with a future retry_at, ignore duplicate retry events.
-      // This is the main fix for webhook spam causing loops and attempt inflation.
-      if (
-        call.status === "queued" &&
-        call.retry_at &&
-        new Date(call.retry_at).getTime() > Date.now()
-      ) {
-        console.log(
-          `[Webhook] Ignoring duplicate retry event ${eventType} for call ${call.id} (already scheduled for retry at ${call.retry_at})`
-        );
-        return new Response(
-          JSON.stringify({ success: true, message: "Duplicate retry ignored" }),
-          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
-      }
-
       const currentAttempt = call.attempt || 1;
       const maxAttempts = call.max_attempts || 1;
       const retryMinutes = call.retry_after_minutes || 2;
 
       if (currentAttempt < maxAttempts) {
-        // Re-queue for retry with delay
-        const retryAt = new Date(
-          Date.now() + retryMinutes * 60 * 1000
-        ).toISOString();
+        const retryAt = new Date(Date.now() + retryMinutes * 60 * 1000).toISOString();
         const nextAttempt = currentAttempt + 1;
 
         console.log(
@@ -384,10 +347,9 @@ serve(async (req) => {
           })
           .eq("id", call.id);
 
-        // Do NOT dispatch next here — this call is re-queued with a retry_at delay.
-        // claim_next_queued_call will pick it up only after retry_at has passed.
+        // ✅ DO NOT dispatch next here.
+        // claim_next_queued_call will only pick it up after retry_at.
       } else {
-        // ── PERMANENT FAILURE (max attempts exhausted) ──
         console.log(
           `[Webhook] Permanently failing call ${call.id}: ${eventType} (attempt ${currentAttempt}/${maxAttempts})`
         );
@@ -407,12 +369,10 @@ serve(async (req) => {
           p_failed: 1,
         });
 
-        // Advance queue + check completion
         await dispatchNextCall(supabase, call.dataset_id);
         await checkDatasetCompletion(supabase, call.dataset_id);
       }
     } else if (eventType === "call.canceled") {
-      // ── CANCELED (not retried) ──
       await supabase
         .from("calls")
         .update({
@@ -431,28 +391,18 @@ serve(async (req) => {
       await dispatchNextCall(supabase, call.dataset_id);
       await checkDatasetCompletion(supabase, call.dataset_id);
     } else {
-      // ── Unknown event: log but don't change status ──
-      console.log(
-        `[Webhook] Unhandled event type: ${eventType} for call ${call.id}`
-      );
+      // Not handled. IMPORTANT: we no longer treat disconnected/hangup/dropped as retryable.
+      console.log(`[Webhook] Unhandled event type: ${eventType} for call ${call.id}`);
     }
 
     return new Response(JSON.stringify({ success: true }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   } catch (error: unknown) {
-    console.error(
-      "[Webhook Error]",
-      error instanceof Error ? error.message : error
-    );
+    console.error("[Webhook Error]", error instanceof Error ? error.message : error);
     return new Response(
-      JSON.stringify({
-        error: error instanceof Error ? error.message : String(error),
-      }),
-      {
-        status: 500,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      }
+      JSON.stringify({ error: error instanceof Error ? error.message : String(error) }),
+      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   }
 });
