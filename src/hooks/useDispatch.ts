@@ -115,9 +115,17 @@ export function useDispatch() {
     if (isExecuting && dataset?.id) {
       const poll = async () => {
         try {
-          await supabase.functions.invoke('trigger-calls', {
+          const { data, error } = await supabase.functions.invoke('trigger-calls', {
             body: { dataset_id: dataset.id },
           });
+          if (error) {
+            const errorStr = typeof error === 'object' ? JSON.stringify(error) : String(error);
+            if (errorStr.includes('401') || errorStr.includes('Unauthorized')) {
+              console.warn('[Poll] Auth lost, stopping dispatch poll.');
+              setIsExecuting(false);
+              return;
+            }
+          }
         } catch (err) {
           console.error('[Poll] trigger-calls error:', err);
         }
