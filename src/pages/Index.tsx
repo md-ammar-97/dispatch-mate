@@ -15,6 +15,8 @@ const Index = () => {
     setSelectedCallId,
     isExecuting,
     progress,
+    retryConfig,
+    setRetryConfig,
     initializeDataset,
     startBatch,
     resetToIntake,
@@ -47,6 +49,8 @@ const Index = () => {
             isExecuting={isExecuting}
             progress={progress}
             onStartBatch={startBatch}
+            retryConfig={retryConfig}
+            onRetryConfigChange={setRetryConfig}
           />
         )}
 

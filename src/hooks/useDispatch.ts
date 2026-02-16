@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { supabase } from '@/integrations/supabase/client';
-import { Dataset, Call, CSVRow } from '@/lib/types';
+import { Dataset, Call, CSVRow, RetryConfig } from '@/lib/types';
 import { formatPhoneNumber } from '@/lib/csv-parser';
 import { toast } from 'sonner';
 
@@ -15,8 +15,10 @@ export function useDispatch() {
   const [calls, setCalls] = useState<Call[]>([]);
   const [selectedCallId, setSelectedCallId] = useState<string | null>(null);
   const [isExecuting, setIsExecuting] = useState(false);
+  const [retryConfig, setRetryConfig] = useState<RetryConfig>({ retryAfterMinutes: 2, totalAttempts: 2 });
   
   const watchdogIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const retryTimersRef = useRef<Map<string, NodeJS.Timeout>>(new Map());
 
   // 1. Realtime Calls Subscription
   useEffect(() => {
@@ -91,9 +93,64 @@ export function useDispatch() {
       console.log('[Batch] All calls terminal. Redirecting to summary.');
       setIsExecuting(false);
       setScreen('summary');
+      // Clear all retry timers
+      retryTimersRef.current.forEach(t => clearTimeout(t));
+      retryTimersRef.current.clear();
       toast.success('Batch execution completed');
     }
   }, [calls, dataset?.id, isExecuting]);
+
+  // 3b. Auto-Retry: watch for "Could Not Connect" failures
+  useEffect(() => {
+    if (!dataset?.id || !isExecuting) return;
+
+    calls.forEach(call => {
+      if (
+        call.status === 'failed' &&
+        call.error_message?.includes('Could Not Connect') &&
+        (call.attempt || 1) < (call.max_attempts || retryConfig.totalAttempts) &&
+        !retryTimersRef.current.has(call.id) &&
+        !call.retry_at
+      ) {
+        const retryAt = new Date(Date.now() + retryConfig.retryAfterMinutes * 60 * 1000).toISOString();
+        const nextAttempt = (call.attempt || 1) + 1;
+
+        // Set retry_at on the call locally
+        setCalls(prev => prev.map(c =>
+          c.id === call.id ? { ...c, retry_at: retryAt, attempt: call.attempt || 1, max_attempts: call.max_attempts || retryConfig.totalAttempts } : c
+        ));
+
+        const timer = setTimeout(async () => {
+          retryTimersRef.current.delete(call.id);
+          console.log(`[Retry] Retrying call ${call.id}, attempt ${nextAttempt}`);
+
+          // Reset call to queued for re-trigger
+          await supabase.from('calls').update({
+            status: 'queued',
+            error_message: null,
+            completed_at: null,
+            started_at: null,
+            call_sid: null,
+          }).eq('id', call.id);
+
+          setCalls(prev => prev.map(c =>
+            c.id === call.id ? { ...c, status: 'queued' as const, error_message: null, retry_at: null, attempt: nextAttempt, completed_at: null, started_at: null } : c
+          ));
+
+          // Re-trigger just this call
+          try {
+            await supabase.functions.invoke('trigger-calls', {
+              body: { dataset_id: dataset!.id, call_ids: [call.id] },
+            });
+          } catch (err) {
+            console.error(`[Retry] Failed to re-trigger call ${call.id}:`, err);
+          }
+        }, retryConfig.retryAfterMinutes * 60 * 1000);
+
+        retryTimersRef.current.set(call.id, timer);
+      }
+    });
+  }, [calls, dataset?.id, isExecuting, retryConfig]);
 
   // 4. Stuck Call Watchdog
   const reconcileStuckCalls = useCallback(async () => {
@@ -203,6 +260,9 @@ export function useDispatch() {
 
     setIsExecuting(true);
 
+    // Stamp retry config onto all calls
+    setCalls(prev => prev.map(c => ({ ...c, attempt: 1, max_attempts: retryConfig.totalAttempts, retry_at: null })));
+
     try {
       await supabase.from('datasets').update({ status: 'executing' }).eq('id', dataset.id);
 
@@ -217,9 +277,12 @@ export function useDispatch() {
       setIsExecuting(false);
       toast.error('Failed to start batch execution');
     }
-  }, [dataset]);
+  }, [dataset, retryConfig]);
 
   const resetToIntake = useCallback(() => {
+    // Clear retry timers
+    retryTimersRef.current.forEach(t => clearTimeout(t));
+    retryTimersRef.current.clear();
     setScreen('intake');
     setDataset(null);
     setCalls([]);
@@ -283,6 +346,7 @@ export function useDispatch() {
   return {
     screen, setScreen, dataset, calls, selectedCall, selectedCallId,
     setSelectedCallId, isExecuting, progress,
+    retryConfig, setRetryConfig,
     initializeDataset, startBatch, resetToIntake, fetchTranscript, fetchCallHistory
   };
 }

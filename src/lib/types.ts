@@ -29,6 +29,15 @@ export interface Call {
   started_at: string | null;
   completed_at: string | null;
   client_timestamp: string | null;
+  // Retry fields (client-side only)
+  attempt?: number;
+  max_attempts?: number;
+  retry_at?: string | null;
+}
+
+export interface RetryConfig {
+  retryAfterMinutes: number;
+  totalAttempts: number;
 }
 
 export interface CSVRow {
