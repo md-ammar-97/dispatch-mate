@@ -19,6 +19,15 @@ interface CallRecord {
 const SUBVERSE_API_URL = "https://api.subverseai.com/api/call/trigger";
 const CALL_DELAY_MS = 2000;
 
+// ✅ Expanded terminal statuses
+const TERMINAL_STATUSES = [
+  "completed",
+  "failed",
+  "canceled",
+  "expired",
+  "errored",
+];
+
 serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
@@ -41,7 +50,9 @@ serve(async (req) => {
     );
 
     const token = authHeader.replace("Bearer ", "");
-    const { data: claimsData, error: claimsError } = await authClient.auth.getClaims(token);
+    const { data: claimsData, error: claimsError } =
+      await authClient.auth.getClaims(token);
+
     if (claimsError || !claimsData?.claims) {
       return new Response(
         JSON.stringify({ error: "Unauthorized" }),
@@ -66,9 +77,11 @@ serve(async (req) => {
         { status: 413, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
+
     const { dataset_id, call_ids } = JSON.parse(body);
 
-    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const uuidRegex = /^[0-9a-f-]{36}$/i;
+
     if (!dataset_id || typeof dataset_id !== "string" || !uuidRegex.test(dataset_id)) {
       return new Response(
         JSON.stringify({ error: "dataset_id is required and must be a valid UUID" }),
@@ -76,17 +89,23 @@ serve(async (req) => {
       );
     }
 
-    // Validate optional call_ids array
-    if (call_ids && (!Array.isArray(call_ids) || !call_ids.every((id: string) => uuidRegex.test(id)))) {
+    if (
+      call_ids &&
+      (!Array.isArray(call_ids) || !call_ids.every((id: string) => uuidRegex.test(id)))
+    ) {
       return new Response(
         JSON.stringify({ error: "call_ids must be an array of valid UUIDs" }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
-    console.log(`[Trigger] Starting batch for dataset ${dataset_id}${call_ids ? ` (${call_ids.length} specific calls)` : ''}`);
+    console.log(
+      `[Trigger] Starting batch for dataset ${dataset_id}${
+        call_ids ? ` (${call_ids.length} specific calls)` : ""
+      }`
+    );
 
-    // Fetch queued calls - optionally filter by specific call_ids
+    // Fetch queued calls
     let query = supabase
       .from("calls")
       .select("*")
@@ -99,10 +118,28 @@ serve(async (req) => {
     }
 
     const { data: calls, error: fetchError } = await query;
-
     if (fetchError) throw fetchError;
 
+    // ✅ If no queued calls, check if dataset should close
     if (!calls || calls.length === 0) {
+      const { data: remaining } = await supabase
+        .from("calls")
+        .select("id")
+        .eq("dataset_id", dataset_id)
+        .not("status", "in", `('${TERMINAL_STATUSES.join("','")}')`);
+
+      if (!remaining || remaining.length === 0) {
+        await supabase
+          .from("datasets")
+          .update({
+            status: "completed",
+            completed_at: new Date().toISOString(),
+          })
+          .eq("id", dataset_id);
+
+        console.log(`[Trigger] Dataset ${dataset_id} marked completed`);
+      }
+
       return new Response(
         JSON.stringify({ message: "No queued calls found" }),
         { headers: { ...corsHeaders, "Content-Type": "application/json" } }
@@ -120,9 +157,9 @@ serve(async (req) => {
       try {
         await supabase
           .from("calls")
-          .update({ 
-            status: "ringing", 
-            started_at: new Date().toISOString() 
+          .update({
+            status: "ringing",
+            started_at: new Date().toISOString(),
           })
           .eq("id", call.id);
 
@@ -137,7 +174,9 @@ serve(async (req) => {
             driver_name: call.driver_name,
             driver_phone: call.phone_number,
             reg_no: call.reg_no,
-            message: call.message || `Hello ${call.driver_name}, your vehicle ${call.reg_no} is ready for dispatch.`,
+            message:
+              call.message ||
+              `Hello ${call.driver_name}, your vehicle ${call.reg_no} is ready for dispatch.`,
           },
         };
 
@@ -156,13 +195,14 @@ serve(async (req) => {
         }
 
         const result = await response.json();
-        console.log(`[Call ${call.id}] Subverse response:`, JSON.stringify(result));
 
-        const subverseCallId = result.data?.callId || result.data?.call_id || result.callId || result.callSid || result.call_id || null;
-        
-        if (!subverseCallId) {
-            console.warn(`[Call ${call.id}] Warning: Could not extract Subverse Call ID.`);
-        }
+        const subverseCallId =
+          result.data?.callId ||
+          result.data?.call_id ||
+          result.callId ||
+          result.callSid ||
+          result.call_id ||
+          null;
 
         await supabase
           .from("calls")
@@ -172,9 +212,7 @@ serve(async (req) => {
           })
           .eq("id", call.id);
 
-        console.log(`[Call ${call.id}] Status set to active, call_sid: ${subverseCallId}`);
         successCount++;
-
       } catch (error) {
         console.error(`[Call ${call.id}] Error:`, error);
 
@@ -182,7 +220,8 @@ serve(async (req) => {
           .from("calls")
           .update({
             status: "failed",
-            error_message: error instanceof Error ? error.message : "Unknown error",
+            error_message:
+              error instanceof Error ? error.message : "Unknown error",
             completed_at: new Date().toISOString(),
           })
           .eq("id", call.id);
@@ -201,6 +240,25 @@ serve(async (req) => {
       }
     }
 
+    // ✅ After loop, check if dataset should close
+    const { data: remainingAfter } = await supabase
+      .from("calls")
+      .select("id")
+      .eq("dataset_id", dataset_id)
+      .not("status", "in", `('${TERMINAL_STATUSES.join("','")}')`);
+
+    if (!remainingAfter || remainingAfter.length === 0) {
+      await supabase
+        .from("datasets")
+        .update({
+          status: "completed",
+          completed_at: new Date().toISOString(),
+        })
+        .eq("id", dataset_id);
+
+      console.log(`[Trigger] Dataset ${dataset_id} auto-completed`);
+    }
+
     return new Response(
       JSON.stringify({
         success: true,
@@ -213,7 +271,9 @@ serve(async (req) => {
   } catch (error) {
     console.error("[Trigger] Fatal error:", error);
     return new Response(
-      JSON.stringify({ error: error instanceof Error ? error.message : "Unknown error" }),
+      JSON.stringify({
+        error: error instanceof Error ? error.message : "Unknown error",
+      }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   }
