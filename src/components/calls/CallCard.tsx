@@ -10,42 +10,60 @@ import { cn } from '@/lib/utils';
    onClick?: () => void;
  }
  
- const statusConfig = {
-   queued: {
-     icon: Phone,
-     label: 'Queued',
-     color: 'text-muted-foreground',
-     bg: 'bg-muted/50',
-   },
-   ringing: {
-     icon: PhoneCall,
-     label: 'Ringing',
-     color: 'text-warning',
-     bg: 'bg-warning/10',
-   },
-   active: {
-     icon: Loader2,
-     label: 'Active',
-     color: 'text-success',
-     bg: 'bg-success/10',
-   },
-   completed: {
-     icon: CheckCircle,
-     label: 'Completed',
-     color: 'text-success',
-     bg: 'bg-success/10',
-   },
-   failed: {
-     icon: XCircle,
-     label: 'Failed',
-     color: 'text-destructive',
-     bg: 'bg-destructive/10',
-   },
- };
+  const statusConfig: Record<string, { icon: typeof Phone; label: string; color: string; bg: string }> = {
+    queued: {
+      icon: Phone,
+      label: 'Queued',
+      color: 'text-muted-foreground',
+      bg: 'bg-muted/50',
+    },
+    ringing: {
+      icon: PhoneCall,
+      label: 'Ringing',
+      color: 'text-warning',
+      bg: 'bg-warning/10',
+    },
+    active: {
+      icon: Loader2,
+      label: 'Active',
+      color: 'text-success',
+      bg: 'bg-success/10',
+    },
+    completed: {
+      icon: CheckCircle,
+      label: 'Completed',
+      color: 'text-success',
+      bg: 'bg-success/10',
+    },
+    failed: {
+      icon: XCircle,
+      label: 'Failed',
+      color: 'text-destructive',
+      bg: 'bg-destructive/10',
+    },
+    canceled: {
+      icon: XCircle,
+      label: 'Canceled',
+      color: 'text-muted-foreground',
+      bg: 'bg-muted/50',
+    },
+    errored: {
+      icon: XCircle,
+      label: 'Errored',
+      color: 'text-destructive',
+      bg: 'bg-destructive/10',
+    },
+    expired: {
+      icon: XCircle,
+      label: 'Expired',
+      color: 'text-muted-foreground',
+      bg: 'bg-muted/50',
+    },
+  };
  
 export function CallCard({ call, isActive, onClick }: CallCardProps) {
-  const config = statusConfig[call.status];
-  const Icon = config.icon;
+   const config = statusConfig[call.status] || statusConfig.failed;
+   const Icon = config.icon;
 
   // Retry countdown timer
   const [countdown, setCountdown] = useState<string | null>(null);
@@ -147,7 +165,7 @@ export function CallCard({ call, isActive, onClick }: CallCardProps) {
             <span className="text-xs font-medium text-muted-foreground">
               Attempt: {call.attempt || 1}/{call.max_attempts}
             </span>
-            {countdown && call.error_message?.includes('Could Not Connect') && (
+            {countdown && call.status === 'queued' && (
               <span className="flex items-center gap-1 text-xs font-mono text-warning">
                 <RotateCcw className="w-3 h-3" />
                 {countdown}

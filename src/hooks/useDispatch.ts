@@ -6,65 +6,14 @@ import { toast } from 'sonner';
 
 export type Screen = 'intake' | 'command' | 'summary';
 
-// ✅ Terminal statuses expanded (so batch completion works even if webhook uses errored/expired)
+// Terminal statuses (comprehensive — matches backend)
 const TERMINAL_STATUSES = ['completed', 'failed', 'canceled', 'errored', 'expired'] as const;
 
-// ✅ Retry should consider more end-states too (Subverse can emit errored/expired/canceled)
-const RETRYABLE_STATUSES = new Set(['failed', 'errored', 'expired', 'canceled']);
+// Poll interval for trigger-calls safety net (picks up delayed retries + missed webhooks)
+const DISPATCH_POLL_INTERVAL_MS = 15_000;
 
-// ✅ Retry bucket: add all possible keywords here
-const RETRYABLE_ERROR_REGEX = new RegExp(
-  [
-    // connectivity / carrier / call setup
-    'could\\s*not\\s*connect',
-    'not\\s*reachable',
-    'unreachable',
-    'network',
-    'no\\s*route',
-    'busy',
-    'line\\s*busy',
-    'call\\s*failed',
-    'failed\\s*to\\s*(connect|dial|place)',
-    'not\\s*answered',
-    'no\\s*answer',
-    'declined',
-    'rejected',
-    'hang\\s*up',
-    'disconnected',
-    'dropped',
-    'cancel(l)?ed',
-
-    // timeouts / expiries
-    'timeout',
-    'timed\\s*out',
-    'expired',
-
-    // generic provider errors
-    'error',
-    'errored',
-    'failed',
-    'gateway',
-    '502',
-    '503',
-    '504',
-    'rate\\s*limit',
-    'too\\s*many\\s*requests',
-  ].join('|'),
-  'i'
-);
-
-// ✅ Do-not-retry bucket
-const DO_NOT_RETRY_REGEX = /(emergency stop|manual stop|stop by user|user cancelled)/i;
-
+// Stuck call timeout
 const STUCK_CALL_TIMEOUT_MS = 500 * 1000;
-
-function isRetryableFailure(call: Call) {
-  const msg = (call.error_message || '').trim();
-  if (!msg) return false;
-  if (!RETRYABLE_STATUSES.has(call.status)) return false;
-  if (DO_NOT_RETRY_REGEX.test(msg)) return false;
-  return RETRYABLE_ERROR_REGEX.test(msg);
-}
 
 export function useDispatch() {
   const [screen, setScreen] = useState<Screen>('intake');
@@ -78,9 +27,9 @@ export function useDispatch() {
   });
 
   const watchdogIntervalRef = useRef<NodeJS.Timeout | null>(null);
-  const retryTimersRef = useRef<Map<string, NodeJS.Timeout>>(new Map());
+  const dispatchPollRef = useRef<NodeJS.Timeout | null>(null);
 
-  // 1. Realtime Calls Subscription
+  // ── 1. Realtime Calls Subscription ──
   useEffect(() => {
     if (!dataset?.id) return;
 
@@ -112,7 +61,7 @@ export function useDispatch() {
     };
   }, [dataset?.id]);
 
-  // 2. Realtime Dataset Subscription
+  // ── 2. Realtime Dataset Subscription ──
   useEffect(() => {
     if (!dataset?.id) return;
 
@@ -143,144 +92,66 @@ export function useDispatch() {
     };
   }, [dataset?.id]);
 
-  // 3. Batch Completion Watcher
+  // ── 3. Batch Completion Watcher (client-side safety net) ──
   useEffect(() => {
     if (!dataset?.id || !isExecuting || calls.length === 0) return;
 
-    const allTerminal = calls.every((c) => TERMINAL_STATUSES.includes(c.status as any));
+    const allTerminal = calls.every((c) =>
+      TERMINAL_STATUSES.includes(c.status as typeof TERMINAL_STATUSES[number])
+    );
 
     if (allTerminal) {
       console.log('[Batch] All calls terminal. Redirecting to summary.');
       setIsExecuting(false);
       setScreen('summary');
-
-      // Clear all retry timers
-      retryTimersRef.current.forEach((t) => clearTimeout(t));
-      retryTimersRef.current.clear();
-
       toast.success('Batch execution completed');
     }
   }, [calls, dataset?.id, isExecuting]);
 
-  // 3b. Auto-Retry: watch for retryable failures (keyword bucket)
+  // ── 4. Dispatch Poll: call trigger-calls every 15s as safety net ──
+  // This ensures delayed retries (retry_at) get picked up, and recovers
+  // from missed webhooks or failed dispatch attempts.
   useEffect(() => {
-    if (!dataset?.id || !isExecuting) return;
-
-    calls.forEach((call) => {
-      const attempt = (call as any).attempt ?? 1;
-      const maxAttempts = (call as any).max_attempts ?? retryConfig.totalAttempts;
-      const retryAtExisting = (call as any).retry_at ?? null;
-
-      if (
-        isRetryableFailure(call) &&
-        attempt < maxAttempts &&
-        !retryTimersRef.current.has(call.id) &&
-        !retryAtExisting
-      ) {
-        const delayMs = retryConfig.retryAfterMinutes * 60 * 1000;
-        const retryAtISO = new Date(Date.now() + delayMs).toISOString();
-        const nextAttempt = attempt + 1;
-
-        // ✅ Persist schedule to DB (safe: logs error if your DB doesn’t have these columns)
-        (async () => {
-          const { error } = await supabase
-            .from('calls')
-            .update({
-              retry_at: retryAtISO,
-              max_attempts: maxAttempts,
-              attempt: attempt,
-            } as any)
-            .eq('id', call.id);
-
-          if (error) {
-            console.error('[Retry] Failed to persist retry schedule:', error);
-          }
-        })();
-
-        // Update local state immediately for UI
-        setCalls((prev) =>
-          prev.map((c) =>
-            c.id === call.id
-              ? ({
-                  ...c,
-                  retry_at: retryAtISO,
-                  max_attempts: maxAttempts,
-                  attempt: attempt,
-                } as any)
-              : c
-          )
-        );
-
-        const timer = setTimeout(async () => {
-          retryTimersRef.current.delete(call.id);
-
-          console.log(`[Retry] Retrying call ${call.id}, attempt ${nextAttempt}`);
-
-          // Reset call to queued for re-trigger + bump attempt
-          const { error: updErr } = await supabase
-            .from('calls')
-            .update({
-              status: 'queued',
-              error_message: null,
-              completed_at: null,
-              started_at: null,
-              call_sid: null,
-              retry_at: null,
-              attempt: nextAttempt,
-              max_attempts: maxAttempts,
-            } as any)
-            .eq('id', call.id);
-
-          if (updErr) {
-            console.error('[Retry] Failed to reset call for retry:', updErr);
-            return;
-          }
-
-          setCalls((prev) =>
-            prev.map((c) =>
-              c.id === call.id
-                ? ({
-                    ...c,
-                    status: 'queued' as const,
-                    error_message: null,
-                    completed_at: null,
-                    started_at: null,
-                    call_sid: null,
-                    retry_at: null,
-                    attempt: nextAttempt,
-                    max_attempts: maxAttempts,
-                  } as any)
-                : c
-            )
-          );
-
-          // Re-trigger just this call
-          const { error } = await supabase.functions.invoke('trigger-calls', {
-            body: { dataset_id: dataset.id, call_ids: [call.id] },
+    if (isExecuting && dataset?.id) {
+      const poll = async () => {
+        try {
+          await supabase.functions.invoke('trigger-calls', {
+            body: { dataset_id: dataset.id },
           });
+        } catch (err) {
+          console.error('[Poll] trigger-calls error:', err);
+        }
+      };
 
-          if (error) {
-            console.error(`[Retry] trigger-calls failed for ${call.id}:`, error);
-          }
-        }, delayMs);
-
-        retryTimersRef.current.set(call.id, timer);
+      if (dispatchPollRef.current) clearInterval(dispatchPollRef.current);
+      dispatchPollRef.current = setInterval(poll, DISPATCH_POLL_INTERVAL_MS);
+    } else {
+      if (dispatchPollRef.current) {
+        clearInterval(dispatchPollRef.current);
+        dispatchPollRef.current = null;
       }
-    });
-  }, [calls, dataset?.id, isExecuting, retryConfig]);
+    }
 
-  // 4. Stuck Call Watchdog
+    return () => {
+      if (dispatchPollRef.current) {
+        clearInterval(dispatchPollRef.current);
+        dispatchPollRef.current = null;
+      }
+    };
+  }, [isExecuting, dataset?.id]);
+
+  // ── 5. Stuck Call Watchdog ──
   const reconcileStuckCalls = useCallback(async () => {
     if (!dataset?.id || !isExecuting) return;
 
     const now = Date.now();
 
     const stuckCalls = calls.filter((c) => {
-      if (TERMINAL_STATUSES.includes(c.status as any)) return false;
+      if (TERMINAL_STATUSES.includes(c.status as typeof TERMINAL_STATUSES[number])) return false;
 
       const startTime = c.started_at
         ? new Date(c.started_at).getTime()
-        : new Date((c as any).created_at).getTime();
+        : new Date(c.created_at).getTime();
 
       const activeTime = now - startTime;
 
@@ -315,7 +186,7 @@ export function useDispatch() {
     );
   }, [calls, dataset?.id, isExecuting]);
 
-  // 5. Watchdog Interval
+  // ── 6. Watchdog Interval ──
   useEffect(() => {
     if (isExecuting && dataset?.id) {
       if (watchdogIntervalRef.current) clearInterval(watchdogIntervalRef.current);
@@ -335,6 +206,7 @@ export function useDispatch() {
     };
   }, [isExecuting, dataset?.id, reconcileStuckCalls]);
 
+  // ── Initialize Dataset ──
   const initializeDataset = useCallback(async (data: CSVRow[]) => {
     try {
       const { data: newDataset, error: datasetError } = await supabase
@@ -378,27 +250,31 @@ export function useDispatch() {
     }
   }, []);
 
+  // ── Start Batch: persist retry config to DB, then dispatch first call ──
   const startBatch = useCallback(async () => {
     if (!dataset) return;
 
     setIsExecuting(true);
 
-    // Stamp retry config onto all calls (local UI state)
-    setCalls((prev) =>
-      prev.map(
-        (c) =>
-          ({
-            ...c,
-            attempt: 1,
-            max_attempts: retryConfig.totalAttempts,
-            retry_at: null,
-          } as any)
-      )
-    );
-
     try {
-      await supabase.from('datasets').update({ status: 'executing' }).eq('id', dataset.id);
+      // Persist retry config to all queued calls in this batch
+      await supabase
+        .from('calls')
+        .update({
+          max_attempts: retryConfig.totalAttempts,
+          retry_after_minutes: retryConfig.retryAfterMinutes,
+          attempt: 1,
+          retry_at: null,
+        } as any)
+        .eq('dataset_id', dataset.id)
+        .eq('status', 'queued');
 
+      await supabase
+        .from('datasets')
+        .update({ status: 'executing' })
+        .eq('id', dataset.id);
+
+      // Dispatch first call via trigger-calls
       const { error } = await supabase.functions.invoke('trigger-calls', {
         body: { dataset_id: dataset.id },
       });
@@ -412,11 +288,8 @@ export function useDispatch() {
     }
   }, [dataset, retryConfig]);
 
+  // ── Reset ──
   const resetToIntake = useCallback(() => {
-    // Clear retry timers
-    retryTimersRef.current.forEach((t) => clearTimeout(t));
-    retryTimersRef.current.clear();
-
     setScreen('intake');
     setDataset(null);
     setCalls([]);
@@ -424,6 +297,7 @@ export function useDispatch() {
     setIsExecuting(false);
   }, []);
 
+  // ── Fetch Transcript ──
   const fetchTranscript = useCallback(async (callId: string) => {
     try {
       const { data, error } = await supabase.functions.invoke('fetch-transcript', {
@@ -439,7 +313,7 @@ export function useDispatch() {
               ? {
                   ...c,
                   refined_transcript: data.transcript,
-                  recording_url: data.recording_url || (c as any).recording_url,
+                  recording_url: data.recording_url || c.recording_url,
                 }
               : c
           )
@@ -457,6 +331,7 @@ export function useDispatch() {
     }
   }, []);
 
+  // ── Fetch Call History ──
   const fetchCallHistory = useCallback(async () => {
     try {
       const thirtyDaysAgo = new Date();
