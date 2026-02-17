@@ -21,9 +21,9 @@ const SUBVERSE_API_URL = "https://api.subverseai.com/api/call/trigger";
 // ── Backstop timeout ──
 // Subverse does NOT send explicit failure webhooks for unanswered calls.
 // If a call stays ringing/active beyond this, treat as "no answer".
-// 5 minutes: long enough for legitimate calls to complete, short enough
+// 1.2 minutes: long enough for legitimate calls to complete, short enough
 // to not block the batch forever.
-const BACKSTOP_TIMEOUT_SECONDS = 300;
+const BACKSTOP_TIMEOUT_SECONDS = 80;
 
 const uuidRegex =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
