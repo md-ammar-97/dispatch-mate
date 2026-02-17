@@ -17,8 +17,6 @@ const IN_QUEUE_EVENTS = new Set(["call.in_queue"]);
 const RINGING_EVENTS = new Set(["call.placed"]);
 const ACTIVE_EVENTS = new Set(["call.initiated"]);
 
-// Retryable failures (kept for future-proofing, but Subverse currently
-// does NOT send these — failure is detected via backstop timeout instead)
 const RETRYABLE_EVENTS = new Set([
   "call.failed",
   "call.no_answer",
@@ -33,7 +31,6 @@ const RETRYABLE_EVENTS = new Set([
 
 const SUBVERSE_API_URL = "https://api.subverseai.com/api/call/trigger";
 
-// ── Payload types ──
 interface SubverseWebhookPayload {
   eventType?: string;
   event?: string;
@@ -121,10 +118,6 @@ function extractProviderStatus(payload: SubverseWebhookPayload): string | null {
   );
 }
 
-// Find call by:
-// 1) our UUID (metadata.call_id) if present
-// 2) provider callId (data.callId) mapped to calls.call_sid
-// deno-lint-ignore no-explicit-any
 async function findCall(
   supabase: any,
   ourCallId: string | null,
@@ -132,7 +125,6 @@ async function findCall(
 ): Promise<{ call: any; matchedBy: string | null }> {
   const uuidRegex = /^[0-9a-f-]{36}$/i;
 
-  // 1) Our UUID (best)
   if (ourCallId && uuidRegex.test(ourCallId)) {
     const { data } = await supabase
       .from("calls")
@@ -142,7 +134,6 @@ async function findCall(
     if (data) return { call: data, matchedBy: "id" };
   }
 
-  // 2) Provider callId -> call_sid (critical fallback for payloads without metadata)
   if (providerCallId) {
     const { data: bySid } = await supabase
       .from("calls")
@@ -155,11 +146,6 @@ async function findCall(
   return { call: null, matchedBy: null };
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Dispatch next queued call for a dataset
-// ─────────────────────────────────────────────────────────────────────────────
-
-// deno-lint-ignore no-explicit-any
 async function dispatchNextCall(supabase: any, datasetId: string) {
   const SUBVERSE_API_KEY = Deno.env.get("SUBVERSE_API_KEY");
   if (!SUBVERSE_API_KEY) {
@@ -245,7 +231,6 @@ async function dispatchNextCall(supabase: any, datasetId: string) {
   }
 }
 
-// deno-lint-ignore no-explicit-any
 async function checkDatasetCompletion(supabase: any, datasetId: string) {
   const terminalList = [...TERMINAL_STATUSES].map((s) => `'${s}'`).join(",");
 
@@ -270,12 +255,10 @@ async function checkDatasetCompletion(supabase: any, datasetId: string) {
 const jsonHeaders = { "Content-Type": "application/json" };
 
 serve(async (req) => {
-  // Reject browser preflight — this is a server-to-server endpoint
   if (req.method === "OPTIONS") {
     return new Response(null, { status: 405 });
   }
 
-  // Reject requests with an Origin header (browsers only)
   if (req.headers.get("origin")) {
     return new Response(JSON.stringify({ error: "Forbidden" }), {
       status: 403,
@@ -284,16 +267,14 @@ serve(async (req) => {
   }
 
   try {
-    // ── Webhook Authentication ──
+    // ── Webhook Authentication (Updated for 2026 February Setup) ──
     const WEBHOOK_SECRET = Deno.env.get("SUBVERSE_WEBHOOK_SECRET");
     if (WEBHOOK_SECRET) {
-      const providedSecret =
-        req.headers.get("x-webhook-secret") ||
-        req.headers.get("x-subverse-secret") ||
-        new URL(req.url).searchParams.get("secret");
+      // Look strictly for the header configured in your Subverse screenshot
+      const providedSecret = req.headers.get("SUBVERSE_WEBHOOK_SECRET");
 
       if (providedSecret !== WEBHOOK_SECRET) {
-        console.warn("[Webhook] Invalid or missing webhook secret");
+        console.warn("[Webhook] Invalid or missing SUBVERSE_WEBHOOK_SECRET header");
         return new Response(JSON.stringify({ error: "Unauthorized" }), {
           status: 401,
           headers: jsonHeaders,
@@ -314,15 +295,13 @@ serve(async (req) => {
     const ourCallId = extractOurCallId(payload);
     const providerCallId = extractProviderCallId(payload);
 
-    // Route in_queue safely even if eventType is generic
     const routedEventType =
       providerStatus === "call.in_queue" ? "call.in_queue" : eventType;
 
     console.log(
-      `[Webhook] Received ${eventType} (routed=${routedEventType}, providerStatus=${providerStatus}) ourCallId=${ourCallId} providerCallId=${providerCallId}`
+      `[Webhook] Received ${eventType} ourCallId=${ourCallId} providerCallId=${providerCallId}`
     );
 
-    // If both identifiers are missing, nothing we can do
     if (!ourCallId && !providerCallId) {
       return new Response(
         JSON.stringify({
@@ -344,12 +323,10 @@ serve(async (req) => {
       });
     }
 
-    // If we matched by id but call_sid is missing, store providerCallId
     if (providerCallId && !call.call_sid) {
       await supabase.from("calls").update({ call_sid: providerCallId }).eq("id", call.id);
     }
 
-    // Idempotency: never regress from terminal status
     if (TERMINAL_STATUSES.has(call.status)) {
       console.log(
         `[Webhook] Call ${call.id} already terminal (${call.status}). Skipping ${routedEventType}. matchedBy=${matchedBy}`
@@ -414,8 +391,7 @@ serve(async (req) => {
       });
     }
 
-    // ── Retryable failure events (future-proofing; Subverse currently
-    //    does not send these for unanswered calls) ──
+    // ── Retryable failure events ──
     if (RETRYABLE_EVENTS.has(routedEventType)) {
       const currentAttempt = call.attempt || 1;
       const maxAttempts = call.max_attempts || 1;
