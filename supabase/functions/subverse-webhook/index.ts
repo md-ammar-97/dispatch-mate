@@ -1,11 +1,7 @@
 import { serve } from "https://deno.land/std@0.190.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type",
-};
+// No CORS headers - this is a server-to-server webhook endpoint
 
 // ── Terminal statuses (never change after reaching these) ──
 const TERMINAL_STATUSES = new Set([
@@ -269,10 +265,20 @@ async function checkDatasetCompletion(supabase: any, datasetId: string) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Main webhook handler
 // ─────────────────────────────────────────────────────────────────────────────
+const jsonHeaders = { "Content-Type": "application/json" };
 
 serve(async (req) => {
+  // Reject browser preflight — this is a server-to-server endpoint
   if (req.method === "OPTIONS") {
-    return new Response(null, { headers: corsHeaders });
+    return new Response(null, { status: 405 });
+  }
+
+  // Reject requests with an Origin header (browsers only)
+  if (req.headers.get("origin")) {
+    return new Response(JSON.stringify({ error: "Forbidden" }), {
+      status: 403,
+      headers: jsonHeaders,
+    });
   }
 
   try {
@@ -288,7 +294,7 @@ serve(async (req) => {
         console.warn("[Webhook] Invalid or missing webhook secret");
         return new Response(
           JSON.stringify({ error: "Unauthorized" }),
-          { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          { status: 401, headers: jsonHeaders }
         );
       }
     }
@@ -320,7 +326,7 @@ serve(async (req) => {
           success: true,
           message: "Missing metadata.call_id; ignoring",
         }),
-        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        { headers: jsonHeaders }
       );
     }
 
@@ -331,7 +337,7 @@ serve(async (req) => {
       );
       return new Response(
         JSON.stringify({ success: true, message: "Call not found" }),
-        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        { headers: jsonHeaders }
       );
     }
 
@@ -341,7 +347,7 @@ serve(async (req) => {
       );
       return new Response(
         JSON.stringify({ success: true, message: "Already terminal" }),
-        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        { headers: jsonHeaders }
       );
     }
 
@@ -359,7 +365,7 @@ serve(async (req) => {
         .eq("id", call.id);
 
       return new Response(JSON.stringify({ success: true }), {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
+        headers: jsonHeaders,
       });
     }
 
@@ -393,7 +399,7 @@ serve(async (req) => {
       await checkDatasetCompletion(supabase, call.dataset_id);
 
       return new Response(JSON.stringify({ success: true }), {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
+        headers: jsonHeaders,
       });
     }
 
@@ -421,7 +427,7 @@ serve(async (req) => {
           .eq("id", call.id);
 
         return new Response(JSON.stringify({ success: true }), {
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
+          headers: jsonHeaders,
         });
       }
 
@@ -444,7 +450,7 @@ serve(async (req) => {
       await checkDatasetCompletion(supabase, call.dataset_id);
 
       return new Response(JSON.stringify({ success: true }), {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
+        headers: jsonHeaders,
       });
     }
 
@@ -469,7 +475,7 @@ serve(async (req) => {
       await checkDatasetCompletion(supabase, call.dataset_id);
 
       return new Response(JSON.stringify({ success: true }), {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
+        headers: jsonHeaders,
       });
     }
 
@@ -478,7 +484,7 @@ serve(async (req) => {
     );
 
     return new Response(JSON.stringify({ success: true }), {
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
+      headers: jsonHeaders,
     });
   } catch (error: unknown) {
     console.error("[Webhook Error]", error instanceof Error ? error.message : error);
@@ -486,7 +492,7 @@ serve(async (req) => {
       JSON.stringify({ error: error instanceof Error ? error.message : String(error) }),
       {
         status: 500,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
+        headers: jsonHeaders,
       }
     );
   }
