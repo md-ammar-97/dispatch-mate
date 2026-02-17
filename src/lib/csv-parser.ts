@@ -1,27 +1,27 @@
-import * as XLSX from 'xlsx';
+import readXlsxFile from 'read-excel-file';
 import { CSVRow, ValidationError } from './types';
 
 const REQUIRED_COLUMNS = ['driver_name', 'phone_number', 'reg_no'];
 
-export function parseXLSX(buffer: ArrayBuffer): { data: CSVRow[]; errors: ValidationError[] } {
+export async function parseXLSX(buffer: ArrayBuffer): Promise<{ data: CSVRow[]; errors: ValidationError[] }> {
   const errors: ValidationError[] = [];
   const data: CSVRow[] = [];
 
   try {
-    const workbook = XLSX.read(buffer, { type: 'array' });
-    
-    if (workbook.SheetNames.length === 0) {
-      errors.push({ row: 0, field: 'file', message: 'XLSX file contains no sheets' });
+    const file = new File([buffer], 'upload.xlsx', { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    const rows = await readXlsxFile(file);
+
+    if (rows.length < 2) {
+      errors.push({ row: 0, field: 'file', message: 'XLSX must have headers and at least one data row' });
       return { data, errors };
     }
 
-    if (workbook.SheetNames.length > 1) {
-      errors.push({ row: 0, field: 'file', message: `XLSX file has ${workbook.SheetNames.length} sheets. Only single-sheet files are supported.` });
-      return { data, errors };
-    }
+    // Convert to CSV string and delegate to parseCSV
+    const csvContent = rows.map(row => row.map(cell => {
+      const val = cell != null ? String(cell) : '';
+      return val.includes(',') || val.includes('"') ? `"${val.replace(/"/g, '""')}"` : val;
+    }).join(',')).join('\n');
 
-    const sheet = workbook.Sheets[workbook.SheetNames[0]];
-    const csvContent = XLSX.utils.sheet_to_csv(sheet);
     return parseCSV(csvContent);
   } catch (e) {
     errors.push({ row: 0, field: 'file', message: `Failed to parse XLSX: ${e instanceof Error ? e.message : 'Unknown error'}` });
