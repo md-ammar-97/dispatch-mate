@@ -217,6 +217,9 @@ export function useDispatch() {
   // ── Initialize Dataset ──
   const initializeDataset = useCallback(async (data: CSVRow[]) => {
     try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) throw new Error('Not authenticated');
+
       const { data: newDataset, error: datasetError } = await supabase
         .from('datasets')
         .insert({
@@ -224,7 +227,8 @@ export function useDispatch() {
           status: 'approved',
           total_calls: data.length,
           approved_at: new Date().toISOString(),
-        })
+          user_id: user.id,
+        } as any)
         .select()
         .single();
 

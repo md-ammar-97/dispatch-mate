@@ -111,6 +111,7 @@ export type Database = {
           status: string
           successful_calls: number
           total_calls: number
+          user_id: string | null
         }
         Insert: {
           approved_at?: string | null
@@ -122,6 +123,7 @@ export type Database = {
           status?: string
           successful_calls?: number
           total_calls?: number
+          user_id?: string | null
         }
         Update: {
           approved_at?: string | null
@@ -133,6 +135,7 @@ export type Database = {
           status?: string
           successful_calls?: number
           total_calls?: number
+          user_id?: string | null
         }
         Relationships: []
       }
