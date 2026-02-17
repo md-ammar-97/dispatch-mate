@@ -13,14 +13,12 @@ const TERMINAL_STATUSES = new Set([
 ]);
 
 // ── In-progress events ──
-// IMPORTANT:
-// - call.in_queue and call.placed are NOT "active" (customer may never pick)
-// - keep them as "ringing" so trigger-calls + SQL guard blocks re-dispatch
 const IN_QUEUE_EVENTS = new Set(["call.in_queue"]);
 const RINGING_EVENTS = new Set(["call.placed"]);
 const ACTIVE_EVENTS = new Set(["call.initiated"]);
 
-// Retryable failures ONLY (do NOT include call.in_queue / call.placed)
+// Retryable failures (kept for future-proofing, but Subverse currently
+// does NOT send these — failure is detected via backstop timeout instead)
 const RETRYABLE_EVENTS = new Set([
   "call.failed",
   "call.no_answer",
@@ -63,7 +61,7 @@ interface SubverseWebhookPayload {
     };
   };
   metadata?: {
-    call_id?: string; // our UUID (critical when present)
+    call_id?: string;
     dataset_id?: string;
     reg_no?: string;
     attempt?: number;
@@ -97,7 +95,7 @@ function formatTranscript(transcriptData: unknown): string | null {
     return transcriptData
       .map((entry) => {
         const role = Object.keys(entry)[0];
-        const text = (entry as any)[role];
+        const text = (entry as Record<string, string>)[role];
         return `${role.charAt(0).toUpperCase() + role.slice(1)}: ${text}`;
       })
       .join("\n");
@@ -125,12 +123,13 @@ function extractProviderStatus(payload: SubverseWebhookPayload): string | null {
 
 // Find call by:
 // 1) our UUID (metadata.call_id) if present
-// 2) provider callId (data.callId) mapped to calls.call_sid (fallback, REQUIRED for your case)
+// 2) provider callId (data.callId) mapped to calls.call_sid
+// deno-lint-ignore no-explicit-any
 async function findCall(
   supabase: any,
   ourCallId: string | null,
   providerCallId: string | null
-) {
+): Promise<{ call: any; matchedBy: string | null }> {
   const uuidRegex = /^[0-9a-f-]{36}$/i;
 
   // 1) Our UUID (best)
@@ -140,24 +139,24 @@ async function findCall(
       .select("*")
       .eq("id", ourCallId)
       .maybeSingle();
-    if (data) return { call: data, matchedBy: "id" as const };
+    if (data) return { call: data, matchedBy: "id" };
   }
 
-  // 2) Provider callId -> call_sid (critical fallback)
+  // 2) Provider callId -> call_sid (critical fallback for payloads without metadata)
   if (providerCallId) {
     const { data: bySid } = await supabase
       .from("calls")
       .select("*")
       .eq("call_sid", providerCallId)
       .maybeSingle();
-    if (bySid) return { call: bySid, matchedBy: "call_sid" as const };
+    if (bySid) return { call: bySid, matchedBy: "call_sid" };
   }
 
-  return { call: null, matchedBy: null as const };
+  return { call: null, matchedBy: null };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Dispatch next queued call for a dataset (non-recursive)
+// Dispatch next queued call for a dataset
 // ─────────────────────────────────────────────────────────────────────────────
 
 // deno-lint-ignore no-explicit-any
@@ -198,7 +197,7 @@ async function dispatchNextCall(supabase: any, datasetId: string) {
         phoneNumber: call.phone_number,
         agentName: "sample_test_9",
         metadata: {
-          call_id: call.id, // best correlation if Subverse returns it
+          call_id: call.id,
           dataset_id: datasetId,
           reg_no: call.reg_no,
           driver_name: call.driver_name,
@@ -220,7 +219,6 @@ async function dispatchNextCall(supabase: any, datasetId: string) {
     const callSid =
       result.data?.callId || result.data?.call_id || result.callId || null;
 
-    // Keep as ringing until we get call.initiated
     await supabase
       .from("calls")
       .update({ status: "ringing", call_sid: callSid })
@@ -267,7 +265,7 @@ async function checkDatasetCompletion(supabase: any, datasetId: string) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Main webhook handler (Lovable security preserved)
+// Main webhook handler
 // ─────────────────────────────────────────────────────────────────────────────
 const jsonHeaders = { "Content-Type": "application/json" };
 
@@ -316,7 +314,7 @@ serve(async (req) => {
     const ourCallId = extractOurCallId(payload);
     const providerCallId = extractProviderCallId(payload);
 
-    // Some payloads give status but generic eventType; route in_queue safely
+    // Route in_queue safely even if eventType is generic
     const routedEventType =
       providerStatus === "call.in_queue" ? "call.in_queue" : eventType;
 
@@ -324,9 +322,7 @@ serve(async (req) => {
       `[Webhook] Received ${eventType} (routed=${routedEventType}, providerStatus=${providerStatus}) ourCallId=${ourCallId} providerCallId=${providerCallId}`
     );
 
-    // ✅ IMPORTANT CHANGE:
-    // If metadata.call_id is missing, DO NOT ignore.
-    // We can still safely match via providerCallId -> calls.call_sid.
+    // If both identifiers are missing, nothing we can do
     if (!ourCallId && !providerCallId) {
       return new Response(
         JSON.stringify({
@@ -348,11 +344,12 @@ serve(async (req) => {
       });
     }
 
-    // If we matched by id but call_sid is missing and we have providerCallId, store it.
+    // If we matched by id but call_sid is missing, store providerCallId
     if (providerCallId && !call.call_sid) {
       await supabase.from("calls").update({ call_sid: providerCallId }).eq("id", call.id);
     }
 
+    // Idempotency: never regress from terminal status
     if (TERMINAL_STATUSES.has(call.status)) {
       console.log(
         `[Webhook] Call ${call.id} already terminal (${call.status}). Skipping ${routedEventType}. matchedBy=${matchedBy}`
@@ -362,7 +359,7 @@ serve(async (req) => {
       });
     }
 
-    // ── In progress ──
+    // ── In progress events ──
     if (
       IN_QUEUE_EVENTS.has(routedEventType) ||
       RINGING_EVENTS.has(routedEventType) ||
@@ -375,7 +372,7 @@ serve(async (req) => {
         .update({
           status: nextStatus,
           started_at: call.started_at || new Date().toISOString(),
-          call_sid: call.call_sid || providerCallId || call.call_sid,
+          call_sid: call.call_sid || providerCallId || null,
         })
         .eq("id", call.id);
 
@@ -384,7 +381,7 @@ serve(async (req) => {
       });
     }
 
-    // ── Success ──
+    // ── Success: call.completed ──
     if (routedEventType === "call.completed") {
       const transcriptStr = formatTranscript(
         payload.data?.transcript || payload.data?.node?.output?.transcript
@@ -417,7 +414,8 @@ serve(async (req) => {
       });
     }
 
-    // ── Retryable failure ──
+    // ── Retryable failure events (future-proofing; Subverse currently
+    //    does not send these for unanswered calls) ──
     if (RETRYABLE_EVENTS.has(routedEventType)) {
       const currentAttempt = call.attempt || 1;
       const maxAttempts = call.max_attempts || 1;

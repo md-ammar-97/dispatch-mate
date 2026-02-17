@@ -9,11 +9,13 @@ export type Screen = 'intake' | 'command' | 'summary';
 // Terminal statuses (comprehensive — matches backend)
 const TERMINAL_STATUSES = ['completed', 'failed', 'canceled', 'errored', 'expired'] as const;
 
-// Poll interval for trigger-calls safety net (picks up delayed retries + missed webhooks)
+// Poll interval for trigger-calls safety net (picks up delayed retries + runs backstop cleanup)
 const DISPATCH_POLL_INTERVAL_MS = 15_000;
 
-// Stuck call timeout
-const STUCK_CALL_TIMEOUT_MS = 500 * 1000;
+// Backstop timeout for the frontend watchdog.
+// Must be LONGER than the server-side backstop (300s) to avoid racing.
+// 10 minutes — only fires if server-side cleanup also failed.
+const FRONTEND_BACKSTOP_TIMEOUT_MS = 600_000;
 
 export function useDispatch() {
   const [screen, setScreen] = useState<Screen>('intake');
@@ -109,13 +111,13 @@ export function useDispatch() {
   }, [calls, dataset?.id, isExecuting]);
 
   // ── 4. Dispatch Poll: call trigger-calls every 15s as safety net ──
-  // This ensures delayed retries (retry_at) get picked up, and recovers
-  // from missed webhooks or failed dispatch attempts.
+  // The server-side trigger-calls function handles backstop timeout cleanup,
+  // dataset completion checks, and dispatching the next queued call.
   useEffect(() => {
     if (isExecuting && dataset?.id) {
       const poll = async () => {
         try {
-          const { data, error } = await supabase.functions.invoke('trigger-calls', {
+          const { error } = await supabase.functions.invoke('trigger-calls', {
             body: { dataset_id: dataset.id },
           });
           if (error) {
@@ -148,7 +150,10 @@ export function useDispatch() {
     };
   }, [isExecuting, dataset?.id]);
 
-  // ── 5. Stuck Call Watchdog ──
+  // ── 5. Frontend Backstop Watchdog ──
+  // Only fires after 10 minutes — a last-resort safety net if both
+  // the webhook and the server-side backstop (5 min) failed.
+  // Does NOT force-fail calls that are legitimately in progress.
   const reconcileStuckCalls = useCallback(async () => {
     if (!dataset?.id || !isExecuting) return;
 
@@ -156,6 +161,7 @@ export function useDispatch() {
 
     const stuckCalls = calls.filter((c) => {
       if (TERMINAL_STATUSES.includes(c.status as typeof TERMINAL_STATUSES[number])) return false;
+      if (c.status === 'queued') return false; // queued calls are waiting, not stuck
 
       const startTime = c.started_at
         ? new Date(c.started_at).getTime()
@@ -163,42 +169,30 @@ export function useDispatch() {
 
       const activeTime = now - startTime;
 
-      return (c.status === 'queued' || c.status === 'ringing') && activeTime > STUCK_CALL_TIMEOUT_MS;
+      return activeTime > FRONTEND_BACKSTOP_TIMEOUT_MS;
     });
 
     if (stuckCalls.length === 0) return;
 
-    console.log(`[Watchdog] Cleaning up ${stuckCalls.length} stuck calls...`);
+    console.log(`[Watchdog] ${stuckCalls.length} calls exceeded frontend backstop (${FRONTEND_BACKSTOP_TIMEOUT_MS / 1000}s). Requesting server cleanup...`);
 
-    await Promise.all(
-      stuckCalls.map(async (call) => {
-        try {
-          await supabase.functions.invoke('stop-call', {
-            body: { call_id: call.id },
-          });
-
-          const { error } = await supabase
-            .from('calls')
-            .update({
-              status: 'failed',
-              error_message: 'Timeout (500s Limit)',
-              completed_at: new Date().toISOString(),
-            } as any)
-            .eq('id', call.id);
-
-          if (error) throw error;
-        } catch (err) {
-          console.error(`[Watchdog] Error cleaning call ${call.id}:`, err);
-        }
-      })
-    );
+    // Instead of directly force-failing, trigger the server-side cleanup
+    // which has proper idempotency guards
+    try {
+      await supabase.functions.invoke('trigger-calls', {
+        body: { dataset_id: dataset.id },
+      });
+    } catch (err) {
+      console.error('[Watchdog] Error invoking trigger-calls:', err);
+    }
   }, [calls, dataset?.id, isExecuting]);
 
   // ── 6. Watchdog Interval ──
   useEffect(() => {
     if (isExecuting && dataset?.id) {
       if (watchdogIntervalRef.current) clearInterval(watchdogIntervalRef.current);
-      watchdogIntervalRef.current = setInterval(reconcileStuckCalls, 5000);
+      // Check every 30s (less aggressive than before)
+      watchdogIntervalRef.current = setInterval(reconcileStuckCalls, 30_000);
     } else {
       if (watchdogIntervalRef.current) {
         clearInterval(watchdogIntervalRef.current);
