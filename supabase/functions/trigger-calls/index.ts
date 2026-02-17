@@ -1,16 +1,24 @@
 import { serve } from "https://deno.land/std@0.190.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type",
-};
+const ALLOWED_ORIGINS = [
+  "https://axestrack.lovable.app",
+  "https://id-preview--fef5f3e2-9d19-4c14-a323-cab361a02cc1.lovable.app",
+  "http://localhost:5173",
+];
+
+function getCorsHeaders(req: Request) {
+  const origin = req.headers.get("origin") || "";
+  return {
+    "Access-Control-Allow-Origin": ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0],
+    "Access-Control-Allow-Headers":
+      "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
+  };
+}
 
 const SUBVERSE_API_URL = "https://api.subverseai.com/api/call/trigger";
 
 // If a call stays in ringing (in_queue/placed) beyond this, treat as "no answer"
-// Keep it > typical ring time but < user retry delay expectations.
 const DEFAULT_RINGING_TIMEOUT_SECONDS = 80;
 
 const uuidRegex =
@@ -92,6 +100,8 @@ async function cleanupStaleRingingCalls(supabase: any, datasetId: string) {
 }
 
 serve(async (req) => {
+  const corsHeaders = getCorsHeaders(req);
+
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
   }
@@ -153,7 +163,7 @@ serve(async (req) => {
       );
     }
 
-    // ✅ NEW: cleanup stale ringing calls (handles "no answer but no webhook")
+    // ✅ cleanup stale ringing calls (handles "no answer but no webhook")
     await cleanupStaleRingingCalls(supabase, dataset_id);
 
     // ── Atomic claim (serialized by pg_advisory_xact_lock inside SQL fn) ──
@@ -262,6 +272,7 @@ serve(async (req) => {
     }
   } catch (error) {
     console.error("[Trigger] Fatal error:", error);
+    const corsHeaders = getCorsHeaders(req);
     return new Response(
       JSON.stringify({
         error: error instanceof Error ? error.message : "Unknown error",
