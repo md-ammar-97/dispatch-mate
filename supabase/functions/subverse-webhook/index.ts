@@ -287,9 +287,7 @@ serve(async (req) => {
     // ── Webhook Authentication ──
     const WEBHOOK_SECRET = Deno.env.get("SUBVERSE_WEBHOOK_SECRET");
     if (WEBHOOK_SECRET) {
-      // Check multiple possible sources for the secret to ensure backward compatibility
       const providedSecret =
-        req.headers.get("SUBVERSE_WEBHOOK_SECRET") || // New custom header from screenshot
         req.headers.get("x-webhook-secret") ||
         req.headers.get("x-subverse-secret") ||
         new URL(req.url).searchParams.get("secret");
@@ -416,7 +414,8 @@ serve(async (req) => {
       });
     }
 
-    // ── Retryable failure events ──
+    // ── Retryable failure events (future-proofing; Subverse currently
+    //    does not send these for unanswered calls) ──
     if (RETRYABLE_EVENTS.has(routedEventType)) {
       const currentAttempt = call.attempt || 1;
       const maxAttempts = call.max_attempts || 1;
