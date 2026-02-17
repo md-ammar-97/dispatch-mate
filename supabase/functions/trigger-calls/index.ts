@@ -18,39 +18,48 @@ function getCorsHeaders(req: Request) {
 
 const SUBVERSE_API_URL = "https://api.subverseai.com/api/call/trigger";
 
-// If a call stays in ringing (in_queue/placed) beyond this, treat as "no answer"
-const DEFAULT_RINGING_TIMEOUT_SECONDS = 80;
+// ── Backstop timeout ──
+// Subverse does NOT send explicit failure webhooks for unanswered calls.
+// If a call stays ringing/active beyond this, treat as "no answer".
+// 5 minutes: long enough for legitimate calls to complete, short enough
+// to not block the batch forever.
+const BACKSTOP_TIMEOUT_SECONDS = 300;
 
 const uuidRegex =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+const TERMINAL_STATUSES = new Set([
+  "completed", "failed", "canceled", "expired", "errored",
+]);
+
 // deno-lint-ignore no-explicit-any
-async function cleanupStaleRingingCalls(supabase: any, datasetId: string) {
+async function cleanupStaleInProgressCalls(supabase: any, datasetId: string) {
   const now = Date.now();
 
-  const { data: ringingCalls, error } = await supabase
+  // Find calls stuck in ringing or active beyond the backstop timeout
+  const { data: stuckCalls, error } = await supabase
     .from("calls")
     .select("id, status, started_at, attempt, max_attempts, retry_after_minutes")
     .eq("dataset_id", datasetId)
-    .eq("status", "ringing");
+    .in("status", ["ringing", "active"]);
 
   if (error) {
-    console.error("[Trigger] cleanupStaleRingingCalls select error:", error);
+    console.error("[Trigger] cleanupStaleInProgressCalls select error:", error);
     return;
   }
 
-  if (!ringingCalls || ringingCalls.length === 0) return;
+  if (!stuckCalls || stuckCalls.length === 0) return;
 
-  for (const call of ringingCalls) {
+  for (const call of stuckCalls) {
     if (!call.started_at) continue;
 
     const startedAtMs = new Date(call.started_at).getTime();
     if (Number.isNaN(startedAtMs)) continue;
 
-    const timeoutSeconds = DEFAULT_RINGING_TIMEOUT_SECONDS;
     const ageSeconds = (now - startedAtMs) / 1000;
 
-    if (ageSeconds < timeoutSeconds) continue;
+    // Only timeout after the full backstop period
+    if (ageSeconds < BACKSTOP_TIMEOUT_SECONDS) continue;
 
     const currentAttempt = call.attempt || 1;
     const maxAttempts = call.max_attempts || 1;
@@ -61,7 +70,7 @@ async function cleanupStaleRingingCalls(supabase: any, datasetId: string) {
       const nextAttempt = currentAttempt + 1;
 
       console.log(
-        `[Trigger] Ringing timeout -> requeue ${call.id} attempt ${nextAttempt}/${maxAttempts} at ${retryAt}`
+        `[Trigger] Backstop timeout (${BACKSTOP_TIMEOUT_SECONDS}s) -> requeue ${call.id} attempt ${nextAttempt}/${maxAttempts} at ${retryAt}`
       );
 
       await supabase
@@ -70,15 +79,16 @@ async function cleanupStaleRingingCalls(supabase: any, datasetId: string) {
           status: "queued",
           attempt: nextAttempt,
           retry_at: retryAt,
-          error_message: `Retry scheduled: ringing timeout (${timeoutSeconds}s)`,
+          error_message: `No answer (backstop timeout ${BACKSTOP_TIMEOUT_SECONDS}s). Retry scheduled.`,
           started_at: null,
           completed_at: null,
           call_sid: null,
         })
-        .eq("id", call.id);
+        .eq("id", call.id)
+        .in("status", ["ringing", "active"]); // safe: only update if still in-progress
     } else {
       console.log(
-        `[Trigger] Ringing timeout -> permanent fail ${call.id} after ${currentAttempt}/${maxAttempts}`
+        `[Trigger] Backstop timeout -> permanent fail ${call.id} after ${currentAttempt}/${maxAttempts}`
       );
 
       await supabase
@@ -86,9 +96,10 @@ async function cleanupStaleRingingCalls(supabase: any, datasetId: string) {
         .update({
           status: "failed",
           completed_at: new Date().toISOString(),
-          error_message: `Provider silent no-answer (ringing timeout ${timeoutSeconds}s) after ${currentAttempt} attempts`,
+          error_message: `No answer (backstop timeout ${BACKSTOP_TIMEOUT_SECONDS}s) after ${currentAttempt} attempts`,
         })
-        .eq("id", call.id);
+        .eq("id", call.id)
+        .in("status", ["ringing", "active"]); // safe: only update if still in-progress
 
       await supabase.rpc("increment_dataset_counts", {
         p_dataset_id: datasetId,
@@ -163,10 +174,32 @@ serve(async (req) => {
       );
     }
 
-    // ✅ cleanup stale ringing calls (handles "no answer but no webhook")
-    await cleanupStaleRingingCalls(supabase, dataset_id);
+    // ── Cleanup calls that exceeded the backstop timeout ──
+    // This handles the case where Subverse never sent a completion/failure webhook
+    await cleanupStaleInProgressCalls(supabase, dataset_id);
 
-    // ── Atomic claim (serialized by pg_advisory_xact_lock inside SQL fn) ──
+    // ── Check dataset completion after cleanup ──
+    const terminalList = [...TERMINAL_STATUSES].map((s) => `'${s}'`).join(",");
+    const { data: remaining } = await supabase
+      .from("calls")
+      .select("id")
+      .eq("dataset_id", dataset_id)
+      .not("status", "in", `(${terminalList})`);
+
+    if (!remaining || remaining.length === 0) {
+      // All calls done — mark dataset completed
+      await supabase
+        .from("datasets")
+        .update({ status: "completed", completed_at: new Date().toISOString() })
+        .eq("id", dataset_id);
+
+      return new Response(
+        JSON.stringify({ message: "All calls completed. Dataset finalized." }),
+        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    // ── Atomic claim ──
     const { data: claimed, error: claimErr } = await supabase.rpc(
       "claim_next_queued_call",
       { p_dataset_id: dataset_id }

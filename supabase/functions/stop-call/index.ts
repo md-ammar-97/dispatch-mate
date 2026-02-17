@@ -16,6 +16,10 @@ function getCorsHeaders(req: Request) {
   };
 }
 
+const TERMINAL_STATUSES = new Set([
+  "completed", "failed", "canceled", "expired", "errored",
+]);
+
 serve(async (req) => {
   const corsHeaders = getCorsHeaders(req);
 
@@ -44,7 +48,6 @@ serve(async (req) => {
         { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
-    // --- End Authentication Check ---
 
     const body = await req.text();
     if (body.length > 10000) {
@@ -61,56 +64,78 @@ serve(async (req) => {
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
+
     const SUBVERSE_API_KEY = Deno.env.get("SUBVERSE_API_KEY");
-    
     const supabase = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
-    
-    const { data: call, error } = await supabase.from("calls").select("call_sid").eq("id", call_id).single();
+
+    const { data: call, error } = await supabase
+      .from("calls")
+      .select("call_sid, status")
+      .eq("id", call_id)
+      .single();
 
     if (error || !call) {
-        throw new Error("Call not found in database");
+      throw new Error("Call not found in database");
     }
 
-    if (call.call_sid) {
-        try {
-            console.log(`[Stop Call] Attempting to cancel Subverse call: ${call.call_sid}`);
-            
-            const response = await fetch(`https://api.subverseai.com/api/call/cancel/${call.call_sid}`, {
-              method: "PUT",
-              headers: {
-                "x-api-key": SUBVERSE_API_KEY!,
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify({})
-            });
-            
-            if (!response.ok) {
-                const errText = await response.text();
-                console.warn(`[Stop Call] Subverse API Cancel Warning: ${errText}`);
-            } else {
-                console.log(`[Stop Call] Subverse call cancelled successfully.`);
-            }
-        } catch (err) {
-            console.error("[Stop Call] Network Error contacting Subverse:", err);
+    // Idempotent: if already terminal, do nothing
+    if (TERMINAL_STATUSES.has(call.status)) {
+      console.log(`[Stop Call] Call ${call_id} already terminal (${call.status}). Skipping.`);
+      return new Response(
+        JSON.stringify({ success: true, message: "Already terminal" }),
+        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    if (call.call_sid && SUBVERSE_API_KEY) {
+      try {
+        console.log(`[Stop Call] Attempting to cancel Subverse call: ${call.call_sid}`);
+
+        const response = await fetch(`https://api.subverseai.com/api/call/cancel/${call.call_sid}`, {
+          method: "PUT",
+          headers: {
+            "x-api-key": SUBVERSE_API_KEY,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({}),
+        });
+
+        if (!response.ok) {
+          const errText = await response.text();
+          console.warn(`[Stop Call] Subverse API Cancel Warning: ${errText}`);
+        } else {
+          console.log(`[Stop Call] Subverse call cancelled successfully.`);
         }
+      } catch (err) {
+        console.error("[Stop Call] Network Error contacting Subverse:", err);
+      }
     } else {
-        console.warn("[Stop Call] No Subverse Call ID found. Forcing local status update only.");
+      console.warn("[Stop Call] No Subverse Call ID found. Forcing local status update only.");
     }
 
+    // Only update if still non-terminal (race-safe)
     const { error: updateError } = await supabase
-        .from("calls")
-        .update({ 
-            status: 'failed', 
-            error_message: 'Stopped by System (Timeout)',
-            completed_at: new Date().toISOString()
-        })
-        .eq("id", call_id);
+      .from("calls")
+      .update({
+        status: "failed",
+        error_message: "Stopped by System (Timeout)",
+        completed_at: new Date().toISOString(),
+      })
+      .eq("id", call_id)
+      .not("status", "in", "('completed','failed','canceled','expired','errored')");
 
     if (updateError) throw updateError;
 
-    return new Response(JSON.stringify({ success: true }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    return new Response(
+      JSON.stringify({ success: true }),
+      { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+    );
   } catch (error: unknown) {
     console.error("[Stop Call] Fatal Error:", error);
-    return new Response(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }), { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    const corsHeaders = getCorsHeaders(req);
+    return new Response(
+      JSON.stringify({ error: error instanceof Error ? error.message : String(error) }),
+      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+    );
   }
 });
