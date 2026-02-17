@@ -17,15 +17,14 @@ const TERMINAL_STATUSES = new Set([
 ]);
 
 // ── In-progress events ──
-// IMPORTANT: call.in_queue MUST be treated as in-progress.
-// It should NOT set DB status to "queued" (otherwise trigger-calls will re-dispatch).
-const IN_PROGRESS_EVENTS = new Set([
-  "call.in_queue",
-  "call.placed",
-  "call.initiated",
-]);
+// IMPORTANT:
+// - call.in_queue and call.placed are NOT "active" (customer may never pick)
+// - keep them as "ringing" so trigger-calls + SQL guard blocks re-dispatch
+const IN_QUEUE_EVENTS = new Set(["call.in_queue"]);
+const RINGING_EVENTS = new Set(["call.placed"]);
+const ACTIVE_EVENTS = new Set(["call.initiated"]);
 
-// Retryable failures ONLY (do NOT include call.in_queue)
+// Retryable failures ONLY (do NOT include call.in_queue / call.placed)
 const RETRYABLE_EVENTS = new Set([
   "call.failed",
   "call.no_answer",
@@ -47,7 +46,7 @@ interface SubverseWebhookPayload {
   createdAt?: string;
   data?: {
     callId?: string;
-    status?: string; // <-- added: provider status sometimes comes here
+    status?: string;
     customerNumber?: string;
     duration?: number;
     recordingURL?: string;
@@ -60,7 +59,7 @@ interface SubverseWebhookPayload {
     node?: {
       output?: {
         call_id?: string;
-        call_status?: string; // provider status sometimes comes here
+        call_status?: string;
         transcript?: unknown;
         call_recording_url?: string;
         analysis?: string;
@@ -68,7 +67,7 @@ interface SubverseWebhookPayload {
     };
   };
   metadata?: {
-    call_id?: string; // our UUID
+    call_id?: string; // our UUID (critical)
     dataset_id?: string;
     reg_no?: string;
     attempt?: number;
@@ -79,23 +78,17 @@ interface SubverseWebhookPayload {
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-function normalizeProviderStatus(
-  status: string | null | undefined
-): string | null {
+function normalizeProviderStatus(status: string | null | undefined): string | null {
   if (!status) return null;
 
-  // Normalize things like:
-  // "Call In Queue" -> "call_in_queue"
-  // "in-queue" -> "in_queue"
   const normalized = status
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "_")
     .replace(/^_+|_+$/g, "");
 
-  // Map common provider variants to our routed event
-  if (["call_in_queue", "in_queue", "queued"].includes(normalized)) {
-    return "call.in_queue";
-  }
+  if (["call_in_queue", "in_queue", "queued"].includes(normalized)) return "call.in_queue";
+  if (["placed", "call_placed"].includes(normalized)) return "call.placed";
+  if (["initiated", "call_initiated", "connected"].includes(normalized)) return "call.initiated";
 
   return normalized;
 }
@@ -120,8 +113,6 @@ function extractEventType(payload: SubverseWebhookPayload): string {
   return (payload.eventType || payload.event || "").toLowerCase();
 }
 
-// Prefer OUR UUID from metadata whenever available.
-// This avoids wrong matching when Subverse callIds are reused/queued/etc.
 function extractOurCallId(payload: SubverseWebhookPayload): string | null {
   return payload.metadata?.call_id || null;
 }
@@ -142,8 +133,8 @@ async function findCall(
   ourCallId: string,
   providerCallId: string | null
 ) {
-  // 1) Our UUID (primary)
   const uuidRegex = /^[0-9a-f-]{36}$/i;
+
   if (uuidRegex.test(ourCallId)) {
     const { data } = await supabase
       .from("calls")
@@ -153,7 +144,6 @@ async function findCall(
     if (data) return data;
   }
 
-  // 2) Fallback: provider call id mapped to call_sid (only if given)
   if (providerCallId) {
     const { data: bySid } = await supabase
       .from("calls")
@@ -168,7 +158,6 @@ async function findCall(
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Dispatch next queued call for a dataset (non-recursive)
-// Called after a call reaches a terminal state to advance the queue.
 // ─────────────────────────────────────────────────────────────────────────────
 
 // deno-lint-ignore no-explicit-any
@@ -209,7 +198,7 @@ async function dispatchNextCall(supabase: any, datasetId: string) {
         phoneNumber: call.phone_number,
         agentName: "sample_test_9",
         metadata: {
-          call_id: call.id, // <-- CRITICAL: our UUID for correlation
+          call_id: call.id, // critical correlation
           dataset_id: datasetId,
           reg_no: call.reg_no,
           driver_name: call.driver_name,
@@ -231,10 +220,7 @@ async function dispatchNextCall(supabase: any, datasetId: string) {
     const callSid =
       result.data?.callId || result.data?.call_id || result.callId || null;
 
-    // NOTE:
-    // We keep "ringing" until webhook says call.placed / call.initiated.
-    // But some teams still set active here; leaving as "active" can be OK too
-    // as claim_next_queued_call blocks on ringing/active.
+    // Keep as ringing until we get call.initiated
     await supabase
       .from("calls")
       .update({ status: "ringing", call_sid: callSid })
@@ -258,12 +244,9 @@ async function dispatchNextCall(supabase: any, datasetId: string) {
       p_successful: 0,
       p_failed: 1,
     });
-
-    // Do NOT recurse here — let the next poll/webhook handle it
   }
 }
 
-// ── Check if all calls in dataset are terminal → auto-close dataset ──
 // deno-lint-ignore no-explicit-any
 async function checkDatasetCompletion(supabase: any, datasetId: string) {
   const terminalList = [...TERMINAL_STATUSES].map((s) => `'${s}'`).join(",");
@@ -306,8 +289,7 @@ serve(async (req) => {
     const ourCallId = extractOurCallId(payload);
     const providerCallId = extractProviderCallId(payload);
 
-    // Some Subverse payloads include "Call In Queue" in status fields while
-    // emitting a generic/non-actionable eventType. Force in-progress handling.
+    // Some payloads give status but generic eventType; route in_queue safely
     const routedEventType =
       providerStatus === "call.in_queue" ? "call.in_queue" : eventType;
 
@@ -316,7 +298,6 @@ serve(async (req) => {
     );
 
     if (!ourCallId) {
-      // If Subverse webhook doesn’t include our metadata, we can’t safely correlate.
       return new Response(
         JSON.stringify({
           success: true,
@@ -337,7 +318,6 @@ serve(async (req) => {
       );
     }
 
-    // Idempotency: terminal calls never change
     if (TERMINAL_STATUSES.has(call.status)) {
       console.log(
         `[Webhook] Call ${call.id} already terminal (${call.status}). Skipping ${routedEventType}.`
@@ -348,22 +328,15 @@ serve(async (req) => {
       );
     }
 
-    // ── In-progress events ──
-    if (IN_PROGRESS_EVENTS.has(routedEventType)) {
-      // ✅ CRITICAL:
-      // If provider says "call.in_queue", DO NOT change DB to "queued".
-      // Keep it "ringing" so claim_next_queued_call blocks new dispatch.
-      const nextStatus =
-        routedEventType === "call.placed" || routedEventType === "call.initiated"
-          ? "active"
-          : "ringing";
+    // ── In progress ──
+    if (IN_QUEUE_EVENTS.has(routedEventType) || RINGING_EVENTS.has(routedEventType) || ACTIVE_EVENTS.has(routedEventType)) {
+      const nextStatus = ACTIVE_EVENTS.has(routedEventType) ? "active" : "ringing";
 
       await supabase
         .from("calls")
         .update({
           status: nextStatus,
           started_at: call.started_at || new Date().toISOString(),
-          // keep call_sid if we have it
           call_sid: call.call_sid || providerCallId || call.call_sid,
         })
         .eq("id", call.id);
@@ -379,7 +352,8 @@ serve(async (req) => {
         payload.data?.transcript || payload.data?.node?.output?.transcript
       );
       const recordingUrl =
-        payload.data?.recordingURL || payload.data?.node?.output?.call_recording_url;
+        payload.data?.recordingURL ||
+        payload.data?.node?.output?.call_recording_url;
 
       await supabase
         .from("calls")
@@ -413,14 +387,8 @@ serve(async (req) => {
       const retryMinutes = call.retry_after_minutes || 2;
 
       if (currentAttempt < maxAttempts) {
-        const retryAt = new Date(
-          Date.now() + retryMinutes * 60 * 1000
-        ).toISOString();
+        const retryAt = new Date(Date.now() + retryMinutes * 60 * 1000).toISOString();
         const nextAttempt = currentAttempt + 1;
-
-        console.log(
-          `[Webhook] Scheduling retry for ${call.id} attempt ${nextAttempt}/${maxAttempts} at ${retryAt}`
-        );
 
         await supabase
           .from("calls")
@@ -431,18 +399,15 @@ serve(async (req) => {
             error_message: `Retry scheduled: ${routedEventType}`,
             completed_at: null,
             started_at: null,
-            // Keep call_sid as-is; we correlate by metadata.call_id anyway
+            call_sid: null,
           })
           .eq("id", call.id);
 
-        // ✅ DO NOT dispatch next immediately here.
-        // Dataset is sequential and this call is pending (delayed retry).
         return new Response(JSON.stringify({ success: true }), {
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       }
 
-      // Permanent failure
       await supabase
         .from("calls")
         .update({
@@ -499,14 +464,9 @@ serve(async (req) => {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   } catch (error: unknown) {
-    console.error(
-      "[Webhook Error]",
-      error instanceof Error ? error.message : error
-    );
+    console.error("[Webhook Error]", error instanceof Error ? error.message : error);
     return new Response(
-      JSON.stringify({
-        error: error instanceof Error ? error.message : String(error),
-      }),
+      JSON.stringify({ error: error instanceof Error ? error.message : String(error) }),
       {
         status: 500,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
