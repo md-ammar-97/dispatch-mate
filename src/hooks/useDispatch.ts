@@ -13,7 +13,7 @@ const TERMINAL_STATUSES = ['completed', 'failed', 'canceled', 'errored', 'expire
 const DISPATCH_POLL_INTERVAL_MS = 15_000;
 
 // Backstop timeout for the frontend watchdog.
-// Must be LONGER than the server-side backstop (300s) to avoid racing.
+// Must be LONGER than the server-side backstop (120s) to avoid racing.
 // 10 minutes — only fires if server-side cleanup also failed.
 const FRONTEND_BACKSTOP_TIMEOUT_MS = 600_000;
 
@@ -152,7 +152,7 @@ export function useDispatch() {
 
   // ── 5. Frontend Backstop Watchdog ──
   // Only fires after 10 minutes — a last-resort safety net if both
-  // the webhook and the server-side backstop (5 min) failed.
+  // the webhook and the server-side backstop (120s) failed.
   // Does NOT force-fail calls that are legitimately in progress.
   const reconcileStuckCalls = useCallback(async () => {
     if (!dataset?.id || !isExecuting) return;
