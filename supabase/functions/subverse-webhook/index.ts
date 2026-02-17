@@ -63,7 +63,7 @@ interface SubverseWebhookPayload {
     };
   };
   metadata?: {
-    call_id?: string; // our UUID (critical, but may be missing in real webhooks)
+    call_id?: string; // our UUID (critical when present)
     dataset_id?: string;
     reg_no?: string;
     attempt?: number;
@@ -123,37 +123,37 @@ function extractProviderStatus(payload: SubverseWebhookPayload): string | null {
   );
 }
 
-// deno-lint-ignore no-explicit-any
+// Find call by:
+// 1) our UUID (metadata.call_id) if present
+// 2) provider callId (data.callId) mapped to calls.call_sid (fallback, REQUIRED for your case)
 async function findCall(
   supabase: any,
   ourCallId: string | null,
   providerCallId: string | null
 ) {
-  // 1) Prefer our UUID if present
-  if (ourCallId) {
-    const uuidRegex = /^[0-9a-f-]{36}$/i;
+  const uuidRegex = /^[0-9a-f-]{36}$/i;
 
-    if (uuidRegex.test(ourCallId)) {
-      const { data } = await supabase
-        .from("calls")
-        .select("*")
-        .eq("id", ourCallId)
-        .maybeSingle();
-      if (data) return data;
-    }
+  // 1) Our UUID (best)
+  if (ourCallId && uuidRegex.test(ourCallId)) {
+    const { data } = await supabase
+      .from("calls")
+      .select("*")
+      .eq("id", ourCallId)
+      .maybeSingle();
+    if (data) return { call: data, matchedBy: "id" as const };
   }
 
-  // 2) Fallback: provider call id mapped to call_sid
+  // 2) Provider callId -> call_sid (critical fallback)
   if (providerCallId) {
     const { data: bySid } = await supabase
       .from("calls")
       .select("*")
       .eq("call_sid", providerCallId)
       .maybeSingle();
-    return bySid || null;
+    if (bySid) return { call: bySid, matchedBy: "call_sid" as const };
   }
 
-  return null;
+  return { call: null, matchedBy: null as const };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -198,7 +198,7 @@ async function dispatchNextCall(supabase: any, datasetId: string) {
         phoneNumber: call.phone_number,
         agentName: "sample_test_9",
         metadata: {
-          call_id: call.id, // critical correlation (may not come back, but keep it)
+          call_id: call.id, // best correlation if Subverse returns it
           dataset_id: datasetId,
           reg_no: call.reg_no,
           driver_name: call.driver_name,
@@ -267,7 +267,7 @@ async function checkDatasetCompletion(supabase: any, datasetId: string) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Main webhook handler
+// Main webhook handler (Lovable security preserved)
 // ─────────────────────────────────────────────────────────────────────────────
 const jsonHeaders = { "Content-Type": "application/json" };
 
@@ -324,9 +324,20 @@ serve(async (req) => {
       `[Webhook] Received ${eventType} (routed=${routedEventType}, providerStatus=${providerStatus}) ourCallId=${ourCallId} providerCallId=${providerCallId}`
     );
 
-    // ✅ CHANGE: Do NOT ignore when metadata.call_id is missing.
-    // We can safely correlate by providerCallId -> calls.call_sid.
-    const call = await findCall(supabase, ourCallId, providerCallId);
+    // ✅ IMPORTANT CHANGE:
+    // If metadata.call_id is missing, DO NOT ignore.
+    // We can still safely match via providerCallId -> calls.call_sid.
+    if (!ourCallId && !providerCallId) {
+      return new Response(
+        JSON.stringify({
+          success: true,
+          message: "Missing both metadata.call_id and data.callId; ignoring",
+        }),
+        { headers: jsonHeaders }
+      );
+    }
+
+    const { call, matchedBy } = await findCall(supabase, ourCallId, providerCallId);
 
     if (!call) {
       console.error(
@@ -337,9 +348,14 @@ serve(async (req) => {
       });
     }
 
+    // If we matched by id but call_sid is missing and we have providerCallId, store it.
+    if (providerCallId && !call.call_sid) {
+      await supabase.from("calls").update({ call_sid: providerCallId }).eq("id", call.id);
+    }
+
     if (TERMINAL_STATUSES.has(call.status)) {
       console.log(
-        `[Webhook] Call ${call.id} already terminal (${call.status}). Skipping ${routedEventType}.`
+        `[Webhook] Call ${call.id} already terminal (${call.status}). Skipping ${routedEventType}. matchedBy=${matchedBy}`
       );
       return new Response(JSON.stringify({ success: true, message: "Already terminal" }), {
         headers: jsonHeaders,
@@ -363,7 +379,7 @@ serve(async (req) => {
         })
         .eq("id", call.id);
 
-      return new Response(JSON.stringify({ success: true }), {
+      return new Response(JSON.stringify({ success: true, matchedBy }), {
         headers: jsonHeaders,
       });
     }
@@ -396,7 +412,7 @@ serve(async (req) => {
       await dispatchNextCall(supabase, call.dataset_id);
       await checkDatasetCompletion(supabase, call.dataset_id);
 
-      return new Response(JSON.stringify({ success: true }), {
+      return new Response(JSON.stringify({ success: true, matchedBy }), {
         headers: jsonHeaders,
       });
     }
@@ -424,7 +440,7 @@ serve(async (req) => {
           })
           .eq("id", call.id);
 
-        return new Response(JSON.stringify({ success: true }), {
+        return new Response(JSON.stringify({ success: true, matchedBy }), {
           headers: jsonHeaders,
         });
       }
@@ -447,7 +463,7 @@ serve(async (req) => {
       await dispatchNextCall(supabase, call.dataset_id);
       await checkDatasetCompletion(supabase, call.dataset_id);
 
-      return new Response(JSON.stringify({ success: true }), {
+      return new Response(JSON.stringify({ success: true, matchedBy }), {
         headers: jsonHeaders,
       });
     }
@@ -472,26 +488,20 @@ serve(async (req) => {
       await dispatchNextCall(supabase, call.dataset_id);
       await checkDatasetCompletion(supabase, call.dataset_id);
 
-      return new Response(JSON.stringify({ success: true }), {
+      return new Response(JSON.stringify({ success: true, matchedBy }), {
         headers: jsonHeaders,
       });
     }
 
-    console.log(
-      `[Webhook] Unhandled event type: ${routedEventType} for call ${call.id}`
-    );
-
-    return new Response(JSON.stringify({ success: true }), {
+    console.log(`[Webhook] Unhandled event type: ${routedEventType} for call ${call.id}`);
+    return new Response(JSON.stringify({ success: true, matchedBy }), {
       headers: jsonHeaders,
     });
   } catch (error: unknown) {
     console.error("[Webhook Error]", error instanceof Error ? error.message : error);
     return new Response(
       JSON.stringify({ error: error instanceof Error ? error.message : String(error) }),
-      {
-        status: 500,
-        headers: jsonHeaders,
-      }
+      { status: 500, headers: jsonHeaders }
     );
   }
 });
