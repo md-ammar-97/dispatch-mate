@@ -30,7 +30,7 @@
       let result: { data: CSVRow[]; errors: ValidationError[] };
       if (isXLSX) {
         const buffer = await file.arrayBuffer();
-        result = parseXLSX(buffer);
+        result = await parseXLSX(buffer);
       } else {
         const content = await file.text();
         result = parseCSV(content);
