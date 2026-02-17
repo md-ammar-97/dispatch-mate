@@ -9,6 +9,88 @@ const corsHeaders = {
 
 const SUBVERSE_API_URL = "https://api.subverseai.com/api/call/trigger";
 
+// If a call stays in ringing (in_queue/placed) beyond this, treat as "no answer"
+// Keep it > typical ring time but < user retry delay expectations.
+const DEFAULT_RINGING_TIMEOUT_SECONDS = 45;
+
+const uuidRegex =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// deno-lint-ignore no-explicit-any
+async function cleanupStaleRingingCalls(supabase: any, datasetId: string) {
+  const now = Date.now();
+
+  const { data: ringingCalls, error } = await supabase
+    .from("calls")
+    .select("id, status, started_at, attempt, max_attempts, retry_after_minutes")
+    .eq("dataset_id", datasetId)
+    .eq("status", "ringing");
+
+  if (error) {
+    console.error("[Trigger] cleanupStaleRingingCalls select error:", error);
+    return;
+  }
+
+  if (!ringingCalls || ringingCalls.length === 0) return;
+
+  for (const call of ringingCalls) {
+    if (!call.started_at) continue;
+
+    const startedAtMs = new Date(call.started_at).getTime();
+    if (Number.isNaN(startedAtMs)) continue;
+
+    const timeoutSeconds = DEFAULT_RINGING_TIMEOUT_SECONDS;
+    const ageSeconds = (now - startedAtMs) / 1000;
+
+    if (ageSeconds < timeoutSeconds) continue;
+
+    const currentAttempt = call.attempt || 1;
+    const maxAttempts = call.max_attempts || 1;
+    const retryMinutes = call.retry_after_minutes || 2;
+
+    if (currentAttempt < maxAttempts) {
+      const retryAt = new Date(Date.now() + retryMinutes * 60 * 1000).toISOString();
+      const nextAttempt = currentAttempt + 1;
+
+      console.log(
+        `[Trigger] Ringing timeout -> requeue ${call.id} attempt ${nextAttempt}/${maxAttempts} at ${retryAt}`
+      );
+
+      await supabase
+        .from("calls")
+        .update({
+          status: "queued",
+          attempt: nextAttempt,
+          retry_at: retryAt,
+          error_message: `Retry scheduled: ringing timeout (${timeoutSeconds}s)`,
+          started_at: null,
+          completed_at: null,
+          call_sid: null,
+        })
+        .eq("id", call.id);
+    } else {
+      console.log(
+        `[Trigger] Ringing timeout -> permanent fail ${call.id} after ${currentAttempt}/${maxAttempts}`
+      );
+
+      await supabase
+        .from("calls")
+        .update({
+          status: "failed",
+          completed_at: new Date().toISOString(),
+          error_message: `Provider silent no-answer (ringing timeout ${timeoutSeconds}s) after ${currentAttempt} attempts`,
+        })
+        .eq("id", call.id);
+
+      await supabase.rpc("increment_dataset_counts", {
+        p_dataset_id: datasetId,
+        p_successful: 0,
+        p_failed: 1,
+      });
+    }
+  }
+}
+
 serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
@@ -33,10 +115,11 @@ serve(async (req) => {
       { global: { headers: { Authorization: authHeader } } }
     );
 
-    const { data: { user }, error: userError } =
-      await authClient.auth.getUser();
+    const token = authHeader.replace("Bearer ", "");
+    const { data: claimsData, error: claimsError } =
+      await authClient.auth.getClaims(token);
 
-    if (userError || !user) {
+    if (claimsError || !claimsData?.claims) {
       return new Response(JSON.stringify({ error: "Unauthorized" }), {
         status: 401,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -65,8 +148,6 @@ serve(async (req) => {
 
     const { dataset_id } = JSON.parse(bodyText);
 
-    const uuidRegex =
-      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     if (!dataset_id || typeof dataset_id !== "string" || !uuidRegex.test(dataset_id)) {
       return new Response(
         JSON.stringify({ error: "dataset_id is required and must be a valid UUID" }),
@@ -74,7 +155,10 @@ serve(async (req) => {
       );
     }
 
-    // ── Atomic claim (serialized per dataset inside SQL) ──
+    // ✅ NEW: cleanup stale ringing calls (handles "no answer but no webhook")
+    await cleanupStaleRingingCalls(supabase, dataset_id);
+
+    // ── Atomic claim (serialized by pg_advisory_xact_lock inside SQL fn) ──
     const { data: claimed, error: claimErr } = await supabase.rpc(
       "claim_next_queued_call",
       { p_dataset_id: dataset_id }
@@ -88,7 +172,8 @@ serve(async (req) => {
     if (!claimed || claimed.length === 0) {
       return new Response(
         JSON.stringify({
-          message: "No dispatchable calls (queue empty, retry_at not reached, or call in progress)",
+          message:
+            "No dispatchable calls (queue empty, retry_at not reached, or call in progress)",
         }),
         { headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
@@ -96,7 +181,7 @@ serve(async (req) => {
 
     const call = claimed[0];
     console.log(
-      `[Trigger] Triggering Subverse for call ${call.id} (attempt ${call.attempt}/${call.max_attempts})`
+      `[Trigger] Dispatching call ${call.id} (attempt ${call.attempt}/${call.max_attempts})`
     );
 
     // ── Place Subverse call ──
@@ -105,7 +190,6 @@ serve(async (req) => {
         phoneNumber: call.phone_number,
         agentName: "sample_test_9",
         metadata: {
-          // ✅ Always include our UUID for webhook correlation
           call_id: call.id,
           dataset_id,
           reg_no: call.reg_no,
@@ -140,18 +224,13 @@ serve(async (req) => {
         result.callSid ||
         null;
 
-      // ✅ IMPORTANT:
-      // Do NOT set status=active here. Subverse may return "Call In Queue".
-      // Keep DB status as "ringing" until webhook says placed/initiated.
+      // Keep as ringing until webhook says initiated
       await supabase
         .from("calls")
-        .update({
-          call_sid: callSid,
-          status: "ringing",
-        })
+        .update({ status: "ringing", call_sid: callSid })
         .eq("id", call.id);
 
-      console.log(`[Trigger] Call ${call.id} is ringing/in-progress, call_sid: ${callSid}`);
+      console.log(`[Trigger] Call ${call.id} ringing, call_sid: ${callSid}`);
 
       return new Response(
         JSON.stringify({ success: true, call_id: call.id, call_sid: callSid }),
@@ -186,7 +265,9 @@ serve(async (req) => {
   } catch (error) {
     console.error("[Trigger] Fatal error:", error);
     return new Response(
-      JSON.stringify({ error: error instanceof Error ? error.message : "Unknown error" }),
+      JSON.stringify({
+        error: error instanceof Error ? error.message : "Unknown error",
+      }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   }
