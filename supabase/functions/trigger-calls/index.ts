@@ -11,7 +11,7 @@ const SUBVERSE_API_URL = "https://api.subverseai.com/api/call/trigger";
 
 // If a call stays in ringing (in_queue/placed) beyond this, treat as "no answer"
 // Keep it > typical ring time but < user retry delay expectations.
-const DEFAULT_RINGING_TIMEOUT_SECONDS = 45;
+const DEFAULT_RINGING_TIMEOUT_SECONDS = 80;
 
 const uuidRegex =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
