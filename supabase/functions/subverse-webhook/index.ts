@@ -288,6 +288,7 @@ serve(async (req) => {
     const WEBHOOK_SECRET = Deno.env.get("SUBVERSE_WEBHOOK_SECRET");
     if (WEBHOOK_SECRET) {
       const providedSecret =
+        req.headers.get("SUBVERSE_WEBHOOK_SECRET") ||
         req.headers.get("x-webhook-secret") ||
         req.headers.get("x-subverse-secret") ||
         new URL(req.url).searchParams.get("secret");
