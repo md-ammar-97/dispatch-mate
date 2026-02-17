@@ -63,7 +63,7 @@ interface SubverseWebhookPayload {
     };
   };
   metadata?: {
-    call_id?: string; // our UUID (critical)
+    call_id?: string; // our UUID (critical, but may be missing in real webhooks)
     dataset_id?: string;
     reg_no?: string;
     attempt?: number;
@@ -126,20 +126,24 @@ function extractProviderStatus(payload: SubverseWebhookPayload): string | null {
 // deno-lint-ignore no-explicit-any
 async function findCall(
   supabase: any,
-  ourCallId: string,
+  ourCallId: string | null,
   providerCallId: string | null
 ) {
-  const uuidRegex = /^[0-9a-f-]{36}$/i;
+  // 1) Prefer our UUID if present
+  if (ourCallId) {
+    const uuidRegex = /^[0-9a-f-]{36}$/i;
 
-  if (uuidRegex.test(ourCallId)) {
-    const { data } = await supabase
-      .from("calls")
-      .select("*")
-      .eq("id", ourCallId)
-      .maybeSingle();
-    if (data) return data;
+    if (uuidRegex.test(ourCallId)) {
+      const { data } = await supabase
+        .from("calls")
+        .select("*")
+        .eq("id", ourCallId)
+        .maybeSingle();
+      if (data) return data;
+    }
   }
 
+  // 2) Fallback: provider call id mapped to call_sid
   if (providerCallId) {
     const { data: bySid } = await supabase
       .from("calls")
@@ -194,7 +198,7 @@ async function dispatchNextCall(supabase: any, datasetId: string) {
         phoneNumber: call.phone_number,
         agentName: "sample_test_9",
         metadata: {
-          call_id: call.id, // critical correlation
+          call_id: call.id, // critical correlation (may not come back, but keep it)
           dataset_id: datasetId,
           reg_no: call.reg_no,
           driver_name: call.driver_name,
@@ -292,10 +296,10 @@ serve(async (req) => {
 
       if (providedSecret !== WEBHOOK_SECRET) {
         console.warn("[Webhook] Invalid or missing webhook secret");
-        return new Response(
-          JSON.stringify({ error: "Unauthorized" }),
-          { status: 401, headers: jsonHeaders }
-        );
+        return new Response(JSON.stringify({ error: "Unauthorized" }), {
+          status: 401,
+          headers: jsonHeaders,
+        });
       }
     }
 
@@ -320,39 +324,34 @@ serve(async (req) => {
       `[Webhook] Received ${eventType} (routed=${routedEventType}, providerStatus=${providerStatus}) ourCallId=${ourCallId} providerCallId=${providerCallId}`
     );
 
-    if (!ourCallId) {
-      return new Response(
-        JSON.stringify({
-          success: true,
-          message: "Missing metadata.call_id; ignoring",
-        }),
-        { headers: jsonHeaders }
-      );
-    }
-
+    // ✅ CHANGE: Do NOT ignore when metadata.call_id is missing.
+    // We can safely correlate by providerCallId -> calls.call_sid.
     const call = await findCall(supabase, ourCallId, providerCallId);
+
     if (!call) {
       console.error(
         `[Webhook] Call not found in DB: ourCallId=${ourCallId} providerCallId=${providerCallId}`
       );
-      return new Response(
-        JSON.stringify({ success: true, message: "Call not found" }),
-        { headers: jsonHeaders }
-      );
+      return new Response(JSON.stringify({ success: true, message: "Call not found" }), {
+        headers: jsonHeaders,
+      });
     }
 
     if (TERMINAL_STATUSES.has(call.status)) {
       console.log(
         `[Webhook] Call ${call.id} already terminal (${call.status}). Skipping ${routedEventType}.`
       );
-      return new Response(
-        JSON.stringify({ success: true, message: "Already terminal" }),
-        { headers: jsonHeaders }
-      );
+      return new Response(JSON.stringify({ success: true, message: "Already terminal" }), {
+        headers: jsonHeaders,
+      });
     }
 
     // ── In progress ──
-    if (IN_QUEUE_EVENTS.has(routedEventType) || RINGING_EVENTS.has(routedEventType) || ACTIVE_EVENTS.has(routedEventType)) {
+    if (
+      IN_QUEUE_EVENTS.has(routedEventType) ||
+      RINGING_EVENTS.has(routedEventType) ||
+      ACTIVE_EVENTS.has(routedEventType)
+    ) {
       const nextStatus = ACTIVE_EVENTS.has(routedEventType) ? "active" : "ringing";
 
       await supabase
@@ -375,8 +374,7 @@ serve(async (req) => {
         payload.data?.transcript || payload.data?.node?.output?.transcript
       );
       const recordingUrl =
-        payload.data?.recordingURL ||
-        payload.data?.node?.output?.call_recording_url;
+        payload.data?.recordingURL || payload.data?.node?.output?.call_recording_url;
 
       await supabase
         .from("calls")
