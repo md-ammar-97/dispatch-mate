@@ -145,8 +145,8 @@ serve(async (req) => {
       headers: { "Content-Type": "application/json", "x-api-key": SUBVERSE_API_KEY! },
       body: JSON.stringify({
         phoneNumber: call.phone_number,
-        agentName: "sample_test_9",
         agentNumber: "+919228055503",
+        agentName: "sample_test_9",
         metadata: { call_id: call.id, dataset_id, reg_no: call.reg_no, driver_name: call.driver_name, attempt: call.attempt },
       }),
     });
