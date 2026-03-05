@@ -146,6 +146,7 @@ serve(async (req) => {
       body: JSON.stringify({
         phoneNumber: call.phone_number,
         agentName: "sample_test_9",
+        agentNumber: "+919228055503",
         metadata: { call_id: call.id, dataset_id, reg_no: call.reg_no, driver_name: call.driver_name, attempt: call.attempt },
       }),
     });
