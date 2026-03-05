@@ -195,8 +195,8 @@ async function dispatchNextCall(supabase: any, datasetId: string) {
       },
       body: JSON.stringify({
         phoneNumber: call.phone_number,
-        agentName: "sample_test_9",
         agentNumber: "+919228055503",
+        agentName: "sample_test_9",
         metadata: {
           call_id: call.id,
           dataset_id: datasetId,
